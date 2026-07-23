@@ -1,0 +1,78 @@
+{
+    "gemini-3.6-flash": {
+        "name": "Gemini 3.6 Flash",
+        "provider": "Google Gemini",
+        "input_cost_per_1m": 1.5,
+        "output_cost_per_1m": 7.5,
+        "cache_read_cost_per_1m": 0.15,
+        "supports_caching": true,
+        "context_window": 1000000
+    },
+    "gemini-3.5-flash-lite": {
+        "name": "Gemini 3.5 Flash-Lite",
+        "provider": "Google Gemini",
+        "input_cost_per_1m": 0.3,
+        "output_cost_per_1m": 2.5,
+        "cache_read_cost_per_1m": 0.075,
+        "supports_caching": true,
+        "context_window": 1000000
+    },
+    "gemini-1.5-flash": {
+        "name": "Gemini 1.5 Flash",
+        "provider": "Google Gemini",
+        "input_cost_per_1m": 0.075,
+        "output_cost_per_1m": 0.3,
+        "cache_read_cost_per_1m": 0.01875,
+        "supports_caching": true,
+        "context_window": 1048576
+    },
+    "gemini-1.5-pro": {
+        "name": "Gemini 1.5 Pro",
+        "provider": "Google Gemini",
+        "input_cost_per_1m": 1.25,
+        "output_cost_per_1m": 5.0,
+        "cache_read_cost_per_1m": 0.3125,
+        "supports_caching": true,
+        "context_window": 2097152
+    },
+    "claude-3-5-sonnet": {
+        "name": "Claude 3.5 Sonnet",
+        "provider": "Anthropic Claude",
+        "input_cost_per_1m": 3.0,
+        "output_cost_per_1m": 15.0,
+        "cache_write_cost_per_1m": 3.75,
+        "cache_read_cost_per_1m": 0.3,
+        "supports_caching": true,
+        "context_window": 200000
+    },
+    "claude-3-5-haiku": {
+        "name": "Claude 3.5 Haiku",
+        "provider": "Anthropic Claude",
+        "input_cost_per_1m": 1.0,
+        "output_cost_per_1m": 5.0,
+        "cache_write_cost_per_1m": 1.25,
+        "cache_read_cost_per_1m": 0.1,
+        "supports_caching": true,
+        "context_window": 200000
+    },
+    "claude-3-opus": {
+        "name": "Claude 3 Opus",
+        "provider": "Anthropic Claude",
+        "input_cost_per_1m": 15.0,
+        "output_cost_per_1m": 75.0,
+        "cache_write_cost_per_1m": 0.0,
+        "cache_read_cost_per_1m": 0.0,
+        "supports_caching": false,
+        "context_window": 200000
+    },
+    "claude-fable-5": {
+        "name": "Claude Fable 5",
+        "provider": "Anthropic Claude",
+        "input_cost_per_1m": 10.0,
+        "output_cost_per_1m": 50.0,
+        "cache_write_cost_per_1m": 12.5,
+        "cache_read_cost_per_1m": 1.0,
+        "supports_caching": true,
+        "context_window": 300000
+    }
+}
