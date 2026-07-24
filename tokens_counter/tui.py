@@ -1,22 +1,11 @@
 import sys
 import os
-import time
-from rich.console import Console
+from rich.console import Console, Group
 from rich.panel import Panel
 from rich.table import Table
-from rich.text import Text
 from rich import box
-from rich.prompt import Prompt, Confirm
 
 console = Console()
-
-# Pixel Art Icons
-COIN_ART = """
-   ▄███▄
-  ▐█▀█▀█▌  [yellow]COIN[/]
-  ▐█▄█▄█▌
-   ▀███▀
-"""
 
 ARCADE_LOGO = """
  [cyan]╔═══════════════════════════════════════════════════════╗[/]
@@ -36,80 +25,19 @@ ARCADE_LOGO = """
        [yellow]--==[ TOKEN PRICE MONITOR - RETRO TUI v1.0 ]==--[/]
 """
 
-CABINET_ART = """
-     .---------.
-    /  (◕) (◕)  \\
-   /   ________  \\
-  /   /        \\  \\
- /   /          \\  \\
- |  |  [yellow]$[/] [cyan]PLAY[/] [yellow]$[/]  |  |
- |  |            |  |
- |  |            |  |
- |  '------------'  |
-  \\                /
-   '--------------'
-"""
-
 def play_beep():
     """Triggers an old-school terminal bell beep sound."""
     sys.stdout.write("\a")
     sys.stdout.flush()
 
-def play_coin_sound():
-    """Simulates a multi-tone insert coin sound."""
-    play_beep()
-    time.sleep(0.1)
-    play_beep()
-
 def clear_screen():
     os.system("cls" if os.name == "nt" else "clear")
 
-def render_wallet(balance):
-    """Renders the virtual coin wallet status in retro layout."""
-    balance_text = f"${balance:.4f}"
-    
-    if balance <= 0:
-        wallet_content = "[blink bold red]══ INSERT COIN TO PLAY ══[/]\n[red]CREDITS: $0.0000[/]"
-        style = "bold red"
-    else:
-        wallet_content = f"[bold yellow]══ ACTIVE SESSION CREDITS ══[/]\n[bold green]CREDITS: {balance_text}[/]"
-        style = "bold green"
-        
-    return Panel(
-        wallet_content,
-        title="[yellow]WALLET[/]",
-        title_align="center",
-        border_style=style,
-        box=box.DOUBLE,
-        width=40
-    )
-
-def render_header(balance):
-    """Renders logo and wallet info side-by-side."""
+def render_header():
+    """Renders the arcade logo banner."""
     clear_screen()
     console.print(ARCADE_LOGO, justify="center")
-    console.print(render_wallet(balance), justify="center")
     console.print()
-
-def get_progress_bar(used, total, length=30):
-    """Renders a pixelated progress bar."""
-    ratio = used / total if total > 0 else 0
-    ratio = min(1.0, max(0.0, ratio))
-    filled = int(ratio * length)
-    empty = length - filled
-    
-    # Pixel style block characters
-    bar = "█" * filled + "░" * empty
-    percent = ratio * 100
-    
-    if ratio < 0.5:
-        color = "green"
-    elif ratio < 0.8:
-        color = "yellow"
-    else:
-        color = "red"
-        
-    return f"[{color}]{bar}[/] {percent:.2f}% ({used}/{total} tokens)"
 
 def render_menu(options):
     """Renders an old-school BIOS/arcade style menu option list."""
@@ -129,153 +57,6 @@ def render_menu(options):
         box=box.DOUBLE,
         width=55
     ), justify="center")
-
-def render_pricing_table(config_data):
-    """Renders a grid of model prices."""
-    table = Table(title="[bold yellow]🕹️ MODEL PAY TABLE (Rates per 1 Million Tokens) 🕹️[/]", box=box.DOUBLE, border_style="cyan")
-    
-    table.add_column("Model Key", style="bold green")
-    table.add_column("Provider", style="magenta")
-    table.add_column("Input Cost", style="cyan", justify="right")
-    table.add_column("Output Cost", style="cyan", justify="right")
-    table.add_column("Cache Read", style="yellow", justify="right")
-    table.add_column("Cache Write", style="yellow", justify="right")
-    table.add_column("Ctx Limit", style="white", justify="right")
-    
-    for key, data in config_data.items():
-        cache_read = f"${data.get('cache_read_cost_per_1m', 0.0):.2f}" if data.get("supports_caching") else "[dim]N/A[/]"
-        cache_write = f"${data.get('cache_write_cost_per_1m', 0.0):.2f}" if data.get("supports_caching") and data.get('cache_write_cost_per_1m') else "[dim]N/A[/]"
-        
-        table.add_row(
-            key,
-            data.get("provider", ""),
-            f"${data.get('input_cost_per_1m', 0.0):.2f}",
-            f"${data.get('output_cost_per_1m', 0.0):.2f}",
-            cache_read,
-            cache_write,
-            f"{data.get('context_window', 0):,}"
-        )
-        
-    console.print(table, justify="center")
-
-def render_high_scores(rows, totals):
-    """Renders an arcade-style HIGH SCORES screen."""
-    # Totals card
-    totals_panel = Panel(
-        f"[bold yellow]TOTAL PLAYS (Calls):[/] [white]{totals['total_calls']}[/]\n"
-        f"[bold cyan]TOTAL INPUT TOKENS :[/] [white]{totals['total_input_tokens']:,}[/]\n"
-        f"[bold magenta]TOTAL OUTPUT TOKENS:[/] [white]{totals['total_output_tokens']:,}[/]\n"
-        f"[bold green]TOTAL SPENT (USD)  :[/] [green]${totals['total_cost']:.6f}[/]",
-        title="[bold green]📊 MACHINE LIFETIME STATS 📊[/]",
-        border_style="green",
-        box=box.ROUNDED,
-        width=50
-    )
-    console.print(totals_panel, justify="center")
-    console.print()
-    
-    # Leaderboard Table
-    table = Table(title="[blink bold yellow]🏆 HIGH SCORE SPENDERS (Leaderboard) 🏆[/]", box=box.DOUBLE, border_style="yellow")
-    table.add_column("Rank", style="bold red", justify="center")
-    table.add_column("Timestamp", style="dim white")
-    table.add_column("Model", style="bold green")
-    table.add_column("Mode", style="magenta", justify="center")
-    table.add_column("Tokens", style="cyan", justify="right")
-    table.add_column("Cost (USD)", style="bold yellow", justify="right")
-    
-    for i, row in enumerate(rows):
-        mode_tag = "[green]LIVE[/]" if row['mode'] == 'live' else "[blue]SIM[/]"
-        rank = f"{i+1}ST" if i == 0 else f"{i+1}ND" if i == 1 else f"{i+1}RD" if i == 2 else f"{i+1}TH"
-        
-        table.add_row(
-            rank,
-            row['timestamp'],
-            row['model'],
-            mode_tag,
-            f"{row['total_tokens']:,}",
-            f"${row['total_cost']:.6f}"
-        )
-        
-    if not rows:
-        table.add_row("-", "-", "No plays recorded yet!", "-", "-", "-")
-        
-    console.print(table, justify="center")
-
-def render_mcp_simulation_results(results, model_info):
-    """Renders simulation results with side-by-side comparison of caching efficiency."""
-    
-    preset_name = results["preset_name"]
-    model_name = model_info["name"]
-    ctx_limit = model_info["context_window"]
-    
-    overview_text = (
-        f"[bold yellow]Model:[/] {model_name} ({model_info['provider']})\n"
-        f"[bold yellow]Preset:[/] {preset_name} ({results['tool_count']} tools)\n"
-        f"[bold yellow]Prompt Tokens:[/] {results['prompt_tokens']}  |  [bold yellow]Tool Schema:[/] {results['schema_tokens']} tokens\n"
-        f"[bold yellow]Tool Response payload:[/] {results['payload_tokens']} tokens\n"
-    )
-    
-    # Render Overview
-    console.print(Panel(overview_text, title="[bold cyan]🎮 SIMULATION SPECIFICATIONS 🎮[/]", border_style="cyan", box=box.ROUNDED, width=70), justify="center")
-    console.print()
-
-    # Compare Cache vs No Cache
-    comparison_table = Table(box=box.DOUBLE, border_style="magenta", title="[bold magenta]🪙 COST AND TOKEN SAVINGS COMPARISON 🪙[/]")
-    comparison_table.add_column("Metric", style="bold white")
-    comparison_table.add_column("Standard (No Caching)", style="bold red", justify="right")
-    comparison_table.add_column("Optimized (With Caching)", style="bold green", justify="right")
-    
-    nocache_data = results["nocache"]
-    cache_data = results["cache"]
-    
-    comparison_table.add_row(
-        "Turn 1 Input (Prompt + Schema)",
-        f"{nocache_data['turn1_input']:,} tokens",
-        f"{cache_data['turn1_input']:,} tokens [dim](Cache Write)[/]"
-    )
-    comparison_table.add_row(
-        "Turn 1 Output (Tool Call Request)",
-        f"{nocache_data['turn1_output']:,} tokens",
-        f"{cache_data['turn1_output']:,} tokens"
-    )
-    comparison_table.add_row(
-        "Turn 2 Input (Full History / Payload)",
-        f"{nocache_data['turn2_input']:,} tokens",
-        f"{cache_data['turn2_input']:,} tokens [dim](+{cache_data['cached_read_tokens']:,} Cached Read)[/]"
-    )
-    comparison_table.add_row(
-        "Turn 2 Output (Final Response)",
-        f"{nocache_data['turn2_output']:,} tokens",
-        f"{cache_data['turn2_output']:,} tokens"
-    )
-    comparison_table.add_row(
-        "Total Input / Output Tokens",
-        f"{nocache_data['total_input']:,} / {nocache_data['total_output']:,}",
-        f"{cache_data['total_input']:,} / {cache_data['total_output']:,}"
-    )
-    comparison_table.add_row(
-        "Total Turn-by-Turn Cost (USD)",
-        f"[bold red]${nocache_data['total_cost']:.6f}[/]",
-        f"[bold green]${cache_data['total_cost']:.6f}[/]"
-    )
-    
-    console.print(comparison_table, justify="center")
-    console.print()
-    
-    # Cost savings alert
-    savings_text = f"[bold green]SAVINGS METRIC:[/] Caching saves [bold yellow]{results['savings_percentage']:.2f}%[/] on this multi-turn MCP execution!"
-    console.print(Panel(savings_text, border_style="green", box=box.ROUNDED, width=70), justify="center")
-    console.print()
-    
-    # Progress bars showing context window usage
-    nocache_used = nocache_data['total_input'] + nocache_data['total_output']
-    cache_used = cache_data['total_input'] + cache_data['total_output']
-    
-    console.print("[bold red]Standard Session Context Usage:[/]", justify="left")
-    console.print(get_progress_bar(nocache_used, ctx_limit), justify="left")
-    console.print("[bold green]Cached Session Context Usage:[/]", justify="left")
-    console.print(get_progress_bar(cache_used, ctx_limit), justify="left")
-    console.print()
 
 def render_live_results(model_key, prompt, response_text, meta, cost):
     """Renders the outcome of a live LLM call."""
@@ -310,53 +91,124 @@ def render_live_results(model_key, prompt, response_text, meta, cost):
     console.print(table, justify="center")
     console.print()
 
-def render_account_dashboard(data):
-    """Renders the real account usage dashboard from CSV data."""
-    if "error" in data:
-        console.print(f"[bold red]Error parsing CSV:[/] {data['error']}")
-        return
+def render_mcp_live_results(model_key, prompt, res, cost):
+    """Renders the outcome of a real Claude call made with Tool-Use/MCP enabled."""
+    mcp_source = "[bold cyan]Remote MCP Server[/]" if res.get("used_remote_mcp") else "[bold cyan]Local Demo Tools[/]"
 
-    # Total Panel
-    total_panel = Panel(
-        f"[bold yellow]TOTAL ACCOUNT SPEND:[/] [bold green]${data['total_cost']:.2f}[/]\n"
-        f"[cyan]Input Tokens:[/] {data['total_input']:,}  |  [magenta]Output Tokens:[/] {data['total_output']:,}\n"
-        f"[green]Cache Read Tokens:[/] {data['total_cache_read']:,}\n"
-        f"[bold yellow]💰 TOTAL SAVED BY CACHING:[/] [bold green]${data['total_saved_by_cache']:.2f}[/]",
-        title="[bold green]📊 REAL ACCOUNT LIFETIME USAGE 📊[/]",
-        border_style="green",
-        box=box.DOUBLE,
-        width=70
-    )
-    console.print(total_panel, justify="center")
+    console.print(Panel(
+        f"[bold green]Final Response:[/]\n{res.get('text', '')}",
+        title="[bold yellow]🖥️ CONSOLE OUTPUT 🖥️[/]",
+        border_style="yellow",
+        box=box.ROUNDED,
+        width=75
+    ), justify="center")
     console.print()
 
-    # Spenders Table
-    table = Table(title="[bold yellow]🔥 TOP SPENDERS BY MODEL 🔥[/]", box=box.ROUNDED, border_style="yellow")
-    table.add_column("Model", style="bold green")
-    table.add_column("Total Cost", style="bold yellow", justify="right")
+    turns = res.get("turns", [])
+    table = Table(box=box.DOUBLE, border_style="magenta", title=f"[bold magenta]🔧 REAL MCP / TOOL-USE BREAKDOWN 🔧[/] (Source: {mcp_source})")
+    table.add_column("Turn", style="bold white", justify="center")
     table.add_column("Input", style="cyan", justify="right")
     table.add_column("Output", style="magenta", justify="right")
     table.add_column("Cache Read", style="green", justify="right")
+    table.add_column("Cache Write", style="blue", justify="right")
+    table.add_column("Tool Calls", style="yellow", justify="right")
+    table.add_column("Stop Reason", style="dim white")
 
-    for model, stats in data["by_model"].items():
+    for turn in turns:
         table.add_row(
-            model,
-            f"${stats['cost']:.2f}",
-            f"{stats['input']:,}",
-            f"{stats['output']:,}",
-            f"{stats['cache_read']:,}"
+            str(turn["turn"]),
+            f"{turn['input_tokens']:,}",
+            f"{turn['output_tokens']:,}",
+            f"{turn['cached_read_tokens']:,}",
+            f"{turn['cached_write_tokens']:,}",
+            str(turn["tool_calls"]),
+            turn["stop_reason"] or "-"
         )
+
     console.print(table, justify="center")
     console.print()
 
-    # Timeline Chart
-    if data["by_date"]:
-        max_val = max(data["by_date"].values()) if data["by_date"] else 1.0
-        chart_lines = ["[bold cyan]📅 SPEND TIMELINE (By Date)[/]"]
-        for date_str, cost in data["by_date"].items():
-            blocks_count = int((cost / max_val) * 40)
-            bar = "█" * blocks_count
-            chart_lines.append(f"[yellow]{date_str}[/] | [green]${cost:6.2f}[/] | [magenta]{bar}[/]")
-        
-        console.print(Panel("\n".join(chart_lines), border_style="cyan", box=box.ROUNDED, width=70), justify="center")
-        console.print()
+    summary_text = (
+        f"[bold yellow]Total Turns:[/] {len(turns)}  |  [bold yellow]Total Tool Calls:[/] {res.get('tool_calls', 0)}\n"
+        f"[bold cyan]Total Input Tokens:[/] {res['input_tokens']:,}  |  [bold magenta]Total Output Tokens:[/] {res['output_tokens']:,}\n"
+        f"[green]Cache Read:[/] {res.get('cached_read_tokens', 0):,}  |  [blue]Cache Write:[/] {res.get('cached_write_tokens', 0):,}\n"
+        f"[bold green]Real Cost (USD):[/] ${cost:.6f}"
+    )
+    console.print(Panel(summary_text, title="[bold green]🪙 REAL MCP TRANSACTION RECEIPT 🪙[/]", border_style="green", box=box.ROUNDED, width=70), justify="center")
+    console.print()
+
+def render_session_monitor_view(sessions):
+    """
+    Builds (does not print) a Rich renderable summarizing local Claude Code
+    sessions and their real token usage/cost. Meant to be passed to
+    rich.live.Live.update() for a self-refreshing view.
+    """
+    active = [s for s in sessions if s["is_active"]]
+    idle = [s for s in sessions if not s["is_active"]]
+
+    total_cost = sum(s["cost"] for s in sessions if s["cost"] is not None)
+    unpriced_count = sum(1 for s in sessions if s["cost"] is None)
+    total_input = sum(s["input_tokens"] for s in sessions)
+    total_output = sum(s["output_tokens"] for s in sessions)
+
+    header_lines = [
+        f"[bold green]● Active sessions:[/] {len(active)}   [dim]○ Idle (5+ min):[/] {len(idle)}",
+        f"[cyan]Total Input:[/] {total_input:,}  |  [magenta]Total Output:[/] {total_output:,}",
+        f"[bold yellow]Estimated Total Spend:[/] ${total_cost:.4f}"
+    ]
+    if unpriced_count:
+        header_lines.append(f"[dim](+{unpriced_count} session(s) using a model with no price in models_config.json)[/]")
+
+    header = Panel(
+        "\n".join(header_lines),
+        title="[bold cyan]🔎 CLAUDE CODE — LIVE SESSION MONITOR 🔎[/]",
+        border_style="cyan",
+        box=box.DOUBLE,
+        width=92
+    )
+
+    table = Table(box=box.ROUNDED, border_style="yellow", title="[bold yellow]Sessions (most recently active first)[/]")
+    table.add_column("Status", justify="center")
+    table.add_column("Project / Session", style="bold green")
+    table.add_column("Model(s)", style="cyan")
+    table.add_column("Reqs", justify="right")
+    table.add_column("Session Tokens (in/out)", justify="right")
+    table.add_column("Session Cost", justify="right", style="bold yellow")
+    table.add_column("Last Prompt (in/out)", justify="right")
+    table.add_column("Last Prompt Cost", justify="right")
+
+    for s in sessions[:15]:
+        status = "[bold green]● LIVE[/]" if s["is_active"] else "[dim]○ idle[/]"
+        project_label = os.path.basename(s["cwd"]) if s.get("cwd") else s["project"]
+        session_label = f"{project_label}\n[dim]{s['session_id'][:8]}…[/]"
+
+        subagent_note = f" [dim](+{s['subagent_count']} subagent(s))[/]" if s["subagent_count"] else ""
+        reqs = f"{s['main_requests']}{subagent_note}"
+
+        cost_str = f"${s['cost']:.4f}" if s["cost"] is not None else "[dim]N/A[/]"
+
+        last_req = s.get("last_request")
+        if last_req:
+            last_tokens = f"{last_req['input_tokens']:,} / {last_req['output_tokens']:,}"
+            last_cost_str = f"${s['last_request_cost']:.4f}" if s.get("last_request_cost") is not None else "[dim]N/A[/]"
+        else:
+            last_tokens = "-"
+            last_cost_str = "-"
+
+        table.add_row(
+            status,
+            session_label,
+            ", ".join(s["models"]) or "-",
+            reqs,
+            f"{s['input_tokens']:,} / {s['output_tokens']:,}",
+            cost_str,
+            last_tokens,
+            last_cost_str
+        )
+
+    if not sessions:
+        table.add_row("-", "No local Claude Code sessions found", "-", "-", "-", "-", "-", "-")
+
+    footer = "[dim]Refreshing every few seconds · Press Ctrl+C to stop and return to the menu[/]"
+
+    return Group(header, table, footer)

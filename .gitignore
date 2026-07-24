@@ -1,9 +1,3 @@
 __pycache__/
 *.pyc
 .env
-*.db
-history.db
-# Ignore actual usage data so users don't leak it accidentally
-*usage.csv
-!anthropic_usage.csv # Keep the sample file if we want to provide it as an example, or just ignore all. Let's ignore all except a renamed sample.
-*.csv

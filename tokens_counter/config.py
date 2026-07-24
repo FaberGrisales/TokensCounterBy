@@ -79,6 +79,36 @@ DEFAULT_CONFIG = {
         "cache_read_cost_per_1m": 1.00,
         "supports_caching": True,
         "context_window": 300000
+    },
+    "claude-sonnet-5": {
+        "name": "Claude Sonnet 5",
+        "provider": "Anthropic Claude",
+        "input_cost_per_1m": 3.00,
+        "output_cost_per_1m": 15.00,
+        "cache_write_cost_per_1m": 3.75,
+        "cache_read_cost_per_1m": 0.30,
+        "supports_caching": True,
+        "context_window": 300000
+    },
+    "claude-opus-4-8": {
+        "name": "Claude Opus 4.8",
+        "provider": "Anthropic Claude",
+        "input_cost_per_1m": 15.00,
+        "output_cost_per_1m": 75.00,
+        "cache_write_cost_per_1m": 18.75,
+        "cache_read_cost_per_1m": 1.50,
+        "supports_caching": True,
+        "context_window": 300000
+    },
+    "claude-haiku-4-5-20251001": {
+        "name": "Claude Haiku 4.5",
+        "provider": "Anthropic Claude",
+        "input_cost_per_1m": 1.00,
+        "output_cost_per_1m": 5.00,
+        "cache_write_cost_per_1m": 1.25,
+        "cache_read_cost_per_1m": 0.10,
+        "supports_caching": True,
+        "context_window": 300000
     }
 }
 
@@ -89,9 +119,19 @@ def load_config():
         return DEFAULT_CONFIG
     try:
         with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
+            config_data = json.load(f)
     except Exception:
         return DEFAULT_CONFIG
+
+    # Backfill any model added to DEFAULT_CONFIG after this file was first
+    # generated, so pricing for new models is available without a manual reset.
+    missing_keys = [key for key in DEFAULT_CONFIG if key not in config_data]
+    if missing_keys:
+        for key in missing_keys:
+            config_data[key] = DEFAULT_CONFIG[key]
+        save_config(config_data)
+
+    return config_data
 
 def save_config(config_data):
     """Save configurations to models_config.json."""

@@ -74,5 +74,35 @@
         "cache_read_cost_per_1m": 1.0,
         "supports_caching": true,
         "context_window": 300000
+    },
+    "claude-sonnet-5": {
+        "name": "Claude Sonnet 5",
+        "provider": "Anthropic Claude",
+        "input_cost_per_1m": 3.0,
+        "output_cost_per_1m": 15.0,
+        "cache_write_cost_per_1m": 3.75,
+        "cache_read_cost_per_1m": 0.3,
+        "supports_caching": true,
+        "context_window": 300000
+    },
+    "claude-opus-4-8": {
+        "name": "Claude Opus 4.8",
+        "provider": "Anthropic Claude",
+        "input_cost_per_1m": 15.0,
+        "output_cost_per_1m": 75.0,
+        "cache_write_cost_per_1m": 18.75,
+        "cache_read_cost_per_1m": 1.5,
+        "supports_caching": true,
+        "context_window": 300000
+    },
+    "claude-haiku-4-5-20251001": {
+        "name": "Claude Haiku 4.5",
+        "provider": "Anthropic Claude",
+        "input_cost_per_1m": 1.0,
+        "output_cost_per_1m": 5.0,
+        "cache_write_cost_per_1m": 1.25,
+        "cache_read_cost_per_1m": 0.1,
+        "supports_caching": true,
+        "context_window": 300000
     }
 }

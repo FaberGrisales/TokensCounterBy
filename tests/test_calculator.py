@@ -2,13 +2,15 @@ import unittest
 import os
 import sys
 import shutil
+import tempfile
+import json
 
 # Add package root to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tokens_counter.config import calculate_call_cost, load_config
-from tokens_counter.history import log_call, get_totals, clear_history, get_high_scores
-from tokens_counter.mcp_simulator import simulate_mcp_call, estimate_tokens_from_text
+from tokens_counter.mcp_tools import execute_tool, safe_arithmetic_eval
+from tokens_counter import session_monitor
 
 
 class TestTokensCalculator(unittest.TestCase):
@@ -47,76 +49,130 @@ class TestTokensCalculator(unittest.TestCase):
         cost = calculate_call_cost("gemini-1.5-flash", 100000, 50000)
         self.assertAlmostEqual(cost, 0.0225)
 
-    def test_estimate_tokens(self):
-        """Test estimation of token count from simple text."""
-        text = "Hello world from the retro console app" # 7 words
-        # 7 / 0.75 = 9.33 -> 9 tokens
-        tokens = estimate_tokens_from_text(text)
-        self.assertEqual(tokens, 9)
-        
-    def test_database_logging(self):
-        """Test database storage and aggregation functions."""
-        # Clear existing logs
-        clear_history()
-        
-        # Log a call
-        log_call(
-            model="gemini-1.5-flash",
-            prompt_summary="Test prompt details",
-            mode="simulation",
-            input_tokens=1000,
-            output_tokens=500,
-            total_cost=0.001,
-            cached_read_tokens=0,
-            cached_write_tokens=0
-        )
-        
-        # Log another call
-        log_call(
-            model="claude-3-5-sonnet",
-            prompt_summary="Second call test",
-            mode="live",
-            input_tokens=2000,
-            output_tokens=1000,
-            total_cost=0.02,
-            cached_read_tokens=1000,
-            cached_write_tokens=0
-        )
-        
-        # Verify aggregates
-        totals = get_totals()
-        self.assertEqual(totals["total_calls"], 2)
-        self.assertEqual(totals["total_input_tokens"], 3000)
-        self.assertEqual(totals["total_output_tokens"], 1500)
-        self.assertEqual(totals["total_cache_read_tokens"], 1000)
-        self.assertAlmostEqual(totals["total_cost"], 0.021)
-        
-        # Verify high scores sorting
-        scores = get_high_scores()
-        self.assertEqual(len(scores), 2)
-        # Claude (0.02) should be first, Gemini (0.001) second
-        self.assertEqual(scores[0]["model"], "claude-3-5-sonnet")
-        self.assertEqual(scores[1]["model"], "gemini-1.5-flash")
-        
-        # Wipe DB
-        clear_history()
-        totals_empty = get_totals()
-        self.assertEqual(totals_empty["total_calls"], 0)
+    def test_safe_arithmetic_eval(self):
+        """Test the AST-restricted arithmetic evaluator used by the 'calculate' MCP tool."""
+        self.assertEqual(safe_arithmetic_eval("12 * (3 + 4)"), 84)
+        self.assertEqual(safe_arithmetic_eval("10 / 2 - 1"), 4.0)
 
-    def test_mcp_simulator(self):
-        """Test MCP tool calling simulation calculations."""
-        # Perform simulation on Claude 3.5 Sonnet with Filesystem operations preset
-        results = simulate_mcp_call("claude-3-5-sonnet", "List files and search index.", "1")
-        
-        # Ensure all key properties are present
-        self.assertIn("nocache", results)
-        self.assertIn("cache", results)
-        self.assertIn("savings_percentage", results)
-        self.assertEqual(results["tool_count"], 3) # Filesystem is 3 tools
-        
-        # Verify no cache costs are larger than cache costs
-        self.assertGreater(results["nocache"]["total_cost"], results["cache"]["total_cost"])
-        self.assertGreater(results["savings_percentage"], 0.0)
+        # Anything beyond plain arithmetic must be rejected, not executed.
+        with self.assertRaises(Exception):
+            safe_arithmetic_eval("__import__('os').system('echo hi')")
+
+    def test_execute_tool_calculate(self):
+        """Test the 'calculate' local MCP demo tool dispatch."""
+        result = execute_tool("calculate", {"expression": "2 + 2"})
+        self.assertEqual(result["result"], 4)
+
+        bad_result = execute_tool("calculate", {"expression": "not a number"})
+        self.assertIn("error", bad_result)
+
+    def test_execute_tool_unknown(self):
+        """Test that unrecognized tool names return an error instead of raising."""
+        result = execute_tool("nonexistent_tool", {})
+        self.assertIn("error", result)
+
+def _usage_line(model, input_tokens, output_tokens, cache_read=0, cache_write=0, timestamp="2026-01-01T00:00:00.000Z", cwd="/home/user/project"):
+    return json.dumps({
+        "type": "assistant",
+        "timestamp": timestamp,
+        "cwd": cwd,
+        "message": {
+            "model": model,
+            "usage": {
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "cache_read_input_tokens": cache_read,
+                "cache_creation_input_tokens": cache_write
+            }
+        }
+    })
+
+
+class TestSessionMonitor(unittest.TestCase):
+    """Tests for session_monitor.py using a synthetic ~/.claude/projects tree, never the real one."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self._prev_config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+        os.environ["CLAUDE_CONFIG_DIR"] = self.temp_dir
+        self.config_data = load_config()
+
+    def tearDown(self):
+        if self._prev_config_dir is None:
+            os.environ.pop("CLAUDE_CONFIG_DIR", None)
+        else:
+            os.environ["CLAUDE_CONFIG_DIR"] = self._prev_config_dir
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _write_session(self, project, session_id, lines, subagent_lines=None):
+        project_dir = os.path.join(self.temp_dir, "projects", project)
+        os.makedirs(project_dir, exist_ok=True)
+        with open(os.path.join(project_dir, f"{session_id}.jsonl"), "w") as f:
+            f.write("\n".join(lines) + "\n")
+        if subagent_lines:
+            subagents_dir = os.path.join(project_dir, session_id, "subagents")
+            os.makedirs(subagents_dir, exist_ok=True)
+            with open(os.path.join(subagents_dir, "agent-1.jsonl"), "w") as f:
+                f.write("\n".join(subagent_lines) + "\n")
+
+    def test_get_all_sessions_basic_cost_and_activity(self):
+        self._write_session("proj-a", "session1", [
+            _usage_line("claude-3-5-sonnet", 10000, 2000, cache_read=8000)
+        ])
+        now = session_monitor._safe_mtime(list(session_monitor.get_claude_config_dir().glob("projects/proj-a/*.jsonl"))[0]) + 1
+        sessions = session_monitor.get_all_sessions(self.config_data, now=now)
+
+        self.assertEqual(len(sessions), 1)
+        s = sessions[0]
+        self.assertEqual(s["main_requests"], 1)
+        self.assertEqual(s["input_tokens"], 10000)
+        self.assertAlmostEqual(s["cost"], calculate_call_cost("claude-3-5-sonnet", 10000, 2000, cached_read_tokens=8000))
+        self.assertTrue(s["is_active"])
+
+    def test_get_all_sessions_idle_when_stale(self):
+        self._write_session("proj-b", "session2", [_usage_line("claude-3-5-sonnet", 100, 50)])
+        far_future = session_monitor.time.time() + 10_000
+        sessions = session_monitor.get_all_sessions(self.config_data, now=far_future)
+        self.assertEqual(len(sessions), 1)
+        self.assertFalse(sessions[0]["is_active"])
+
+    def test_get_all_sessions_includes_subagent_usage(self):
+        self._write_session(
+            "proj-c", "session3",
+            [_usage_line("claude-3-5-sonnet", 1000, 200)],
+            subagent_lines=[_usage_line("claude-3-5-haiku", 500, 100)]
+        )
+        sessions = session_monitor.get_all_sessions(self.config_data)
+        self.assertEqual(len(sessions), 1)
+        s = sessions[0]
+        self.assertEqual(s["main_requests"], 1)
+        self.assertEqual(s["subagent_requests"], 1)
+        self.assertEqual(s["subagent_count"], 1)
+        # Totals must include both the main conversation and its subagent
+        self.assertEqual(s["input_tokens"], 1500)
+        self.assertEqual(s["output_tokens"], 300)
+
+    def test_get_all_sessions_unpriced_model_returns_none_cost(self):
+        self._write_session("proj-d", "session4", [_usage_line("some-unknown-future-model", 100, 50)])
+        sessions = session_monitor.get_all_sessions(self.config_data)
+        self.assertEqual(len(sessions), 1)
+        self.assertIsNone(sessions[0]["cost"])
+
+    def test_get_all_sessions_ignores_malformed_lines(self):
+        project_dir = os.path.join(self.temp_dir, "projects", "proj-e")
+        os.makedirs(project_dir, exist_ok=True)
+        with open(os.path.join(project_dir, "session5.jsonl"), "w") as f:
+            f.write("not valid json\n")
+            f.write(_usage_line("claude-3-5-sonnet", 100, 50) + "\n")
+            f.write("{}\n")
+
+        sessions = session_monitor.get_all_sessions(self.config_data)
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0]["main_requests"], 1)
+
+    def test_get_all_sessions_empty_when_no_projects_dir(self):
+        sessions = session_monitor.get_all_sessions(self.config_data)
+        self.assertEqual(sessions, [])
 
 
 if __name__ == "__main__":

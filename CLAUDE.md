@@ -1,0 +1,40 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## What this is
+
+A terminal (TUI) app, styled as a retro arcade cabinet, for tracking the real cost of LLM usage (Claude and Gemini). It has two menu capabilities: making real metered API calls (optionally with real Claude tool-use/MCP), and a live-refreshing monitor of local Claude Code session token/cost usage. There is no simulated/estimated-cost feature and no game mechanics (no wallet/credits, no call-history leaderboard, no pricing-editor screen, no CSV import) — every number shown comes from a real API response or a real local Claude Code transcript. Model pricing lives in `tokens_counter/models_config.json`, edited by hand. All Rich-rendered UI text and menu labels are in Spanish/English mixed "arcade" flavor — preserve that tone when touching `tui.py`.
+
+## Commands
+
+Run from the project root:
+
+```bash
+python3 -m venv .venv && source .venv/bin/activate   # create/activate a virtualenv (not committed to git)
+pip install rich anthropic google-genai              # install dependencies
+python3 start.py                                      # launch the interactive TUI app
+python3 -m unittest tests.test_calculator             # run the full test suite
+python3 -m unittest tests.test_calculator.TestSessionMonitor.test_get_all_sessions_includes_subagent_usage  # run a single test
+```
+
+There is no lint/format tooling configured in this repo.
+
+## Architecture
+
+**Entry point:** `start.py` adds the project root to `sys.path` and calls `tokens_counter.main.main()`. All interactive flow — the menu loop and dispatch to each feature — lives in `tokens_counter/main.py`. That file is the place to look first to understand how a menu option wires together config, pricing, and rendering. There is no persistence layer in this app (no database, no wallet state) — every menu action is a self-contained round trip: gather input → call a real backend → render the real result.
+
+**Module responsibilities:**
+- `config.py` — loads/saves `models_config.json` (pricing per model, per-1M-token rates for input/output/cache-read/cache-write). `DEFAULT_CONFIG` is the factory fallback used on first run. `load_config()` also backfills: any model key present in `DEFAULT_CONFIG` but missing from an existing on-disk `models_config.json` gets merged in and saved, so adding a new default model to the code (e.g. for `session_monitor.py` to be able to price it) doesn't require existing users to manually edit their pricing file. `calculate_call_cost()` is the single source of truth for USD cost math: it treats `input_tokens` as the *total* input, then subtracts `cached_read_tokens` and `cached_write_tokens` from it to get standard-rate tokens, and applies each rate accordingly. Callers must pass token counts consistent with that convention (i.e. cached tokens are already included in `input_tokens`, not additive). There is no in-app UI to edit pricing — users edit `models_config.json` directly.
+- `live_client.py` — `LiveClientManager` wraps the real `anthropic` and `google-genai` SDKs. Both imports are optional/soft (wrapped in try/except with `*_AVAILABLE` flags) so the app runs even if a provider SDK isn't installed. API keys come from `ANTHROPIC_API_KEY` / `GEMINI_API_KEY` env vars only, never from config files. `call_gemini`/`call_claude` return a uniform dict shape (`text`, `input_tokens`, `output_tokens`, `cached_read_tokens`, `cached_write_tokens`, `error`) regardless of provider, which is what lets `main.py` treat both providers identically downstream. `call_claude_with_tools` is a separate, Claude-only entry point that runs a real multi-turn tool-use loop (bounded by `max_turns`): it either dispatches client-side to the local tools in `mcp_tools.py`, or — if given `mcp_server_url` — passes an Anthropic MCP-connector `mcp_servers` request block (beta, via `extra_body`/`extra_headers`) so the API resolves `mcp_tool_use`/`mcp_tool_result` blocks against a real remote MCP server itself. Either way it returns real aggregated usage plus a per-turn `turns` breakdown, not simulated numbers.
+- `mcp_tools.py` — local, side-effect-free demo tools (`get_current_time`, `calculate`, `list_project_files`) that `call_claude_with_tools` lets Claude actually invoke when no remote MCP server is configured. `calculate` is evaluated through a small AST-restricted `safe_arithmetic_eval` (no `eval()`) since the expression string originates from model output.
+- `session_monitor.py` — reads Claude Code's own local session transcripts (JSONL files under `<CLAUDE_CONFIG_DIR or ~/.claude>/projects/<project>/<session-id>.jsonl`, plus any nested `<session-id>/subagents/**/*.jsonl` for spawned subagents/workflows) to show real, live, machine-wide token/cost usage per session — not just usage from this app. `find_session_groups()` pairs each top-level transcript with its nested subagent transcripts; `_iter_usage_lines()` extracts *only* token/model/timestamp metadata from assistant messages, deliberately never reading prompt/response text, and skips `model == "<synthetic>"` placeholder lines (zero-usage internal markers) so they don't inflate request counts. `build_session_summary()` buckets tokens by model (a session's main conversation and its subagents can use different models) before pricing each bucket via `config.calculate_call_cost`, so cost is `None` (not `$0`) when a model has no entry in `models_config.json`. A session counts as active if its newest transcript file (main or any subagent) was modified within `ACTIVE_THRESHOLD_SECONDS` (300s). `watch_sessions()` drives a `rich.live.Live` loop calling `tui.render_session_monitor_view()` every few seconds until the user hits Ctrl+C. This on-disk layout is an internal Claude Code implementation detail (confirmed officially documented but explicitly not a stable API), so every parsing step degrades to "skip this line/file" on error rather than raising.
+- `tui.py` — all Rich-based rendering (banners, tables, panels, terminal beeps). Pure presentation; takes plain dicts/rows from the other modules and has no business logic of its own. `render_session_monitor_view()` is the one exception to "prints directly" — it *returns* a `Group` renderable instead of printing, since `Live.update()` needs a renderable to swap in.
+
+**Data flow for a typical menu action** (e.g. a real Claude call): `main.py` collects user input via `Prompt`/`Confirm` → calls into `live_client.py` (which returns real usage) → computes cost via `config.calculate_call_cost` → calls the matching `tui.render_*` function to display the result. Nothing is persisted between runs. The real-tool-use path (menu option 1, Claude models only) follows the same shape but calls `live_client.call_claude_with_tools` and renders via `tui.render_mcp_live_results`. The Live Session Monitor (menu option 2) is the odd one out: it's a read-only, real-time view over Claude Code's own on-disk transcripts, independent of anything this app does.
+
+## Data and secrets
+
+- `tokens_counter/models_config.json` is tracked in git (not gitignored), so `load_config()`'s auto-backfill of new default models (see `config.py` above) will leave real, committable pricing changes in the working tree.
+- Real API keys are read only from environment variables, never written to disk by this app.
+- `session_monitor.py` reads outside the repo, from `~/.claude` (or `$CLAUDE_CONFIG_DIR`) on the user's own machine. Keep it that way strictly read-only, and keep it extracting *only* usage metadata — never surface prompt/response text from those transcripts in `tui.render_session_monitor_view()`.
