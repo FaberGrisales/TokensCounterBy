@@ -174,6 +174,60 @@ class TestSessionMonitor(unittest.TestCase):
         sessions = session_monitor.get_all_sessions(self.config_data)
         self.assertEqual(sessions, [])
 
+    def test_get_all_sessions_exposes_by_model_breakdown(self):
+        self._write_session(
+            "proj-f", "session6",
+            [_usage_line("claude-3-5-sonnet", 1000, 200)],
+            subagent_lines=[_usage_line("claude-3-5-haiku", 500, 100)]
+        )
+        sessions = session_monitor.get_all_sessions(self.config_data)
+        by_model = sessions[0]["by_model"]
+        self.assertEqual(by_model["claude-3-5-sonnet"]["input"], 1000)
+        self.assertEqual(by_model["claude-3-5-haiku"]["input"], 500)
+
+    def test_get_global_usage_summary_aggregates_by_model_and_project(self):
+        self._write_session("proj-a", "session1", [_usage_line("claude-3-5-sonnet", 1000, 200, cwd="/home/user/proj-a")])
+        self._write_session("proj-a", "session2", [_usage_line("claude-3-5-sonnet", 500, 100, cwd="/home/user/proj-a")])
+        self._write_session("proj-b", "session3", [_usage_line("claude-3-5-haiku", 300, 50, cwd="/home/user/proj-b")])
+
+        summary = session_monitor.get_global_usage_summary(self.config_data)
+
+        self.assertEqual(summary["session_count"], 3)
+        self.assertEqual(summary["total_requests"], 3)
+
+        model_totals = {m["model"]: m for m in summary["usage_by_model"]}
+        self.assertEqual(model_totals["claude-3-5-sonnet"]["input"], 1500)
+        self.assertEqual(model_totals["claude-3-5-haiku"]["input"], 300)
+
+        expected_cost = (
+            calculate_call_cost("claude-3-5-sonnet", 1500, 300)
+            + calculate_call_cost("claude-3-5-haiku", 300, 50)
+        )
+        self.assertAlmostEqual(summary["total_cost"], expected_cost)
+
+        project_totals = {p["project"]: p for p in summary["projects"]}
+        self.assertEqual(project_totals["proj-a"]["requests"], 2)
+        self.assertEqual(project_totals["proj-a"]["input"], 1500)
+        self.assertEqual(project_totals["proj-b"]["requests"], 1)
+
+    def test_get_global_usage_summary_handles_unpriced_models(self):
+        self._write_session("proj-g", "session7", [_usage_line("some-unknown-future-model", 100, 50)])
+        summary = session_monitor.get_global_usage_summary(self.config_data)
+
+        model_entry = summary["usage_by_model"][0]
+        self.assertEqual(model_entry["model"], "some-unknown-future-model")
+        self.assertIsNone(model_entry["cost"])
+        self.assertIsNone(summary["projects"][0]["cost"])
+        # Total cost stays None only if truly nothing was priced.
+        self.assertIsNone(summary["total_cost"])
+
+    def test_get_global_usage_summary_empty_when_no_sessions(self):
+        summary = session_monitor.get_global_usage_summary(self.config_data)
+        self.assertEqual(summary["session_count"], 0)
+        self.assertEqual(summary["usage_by_model"], [])
+        self.assertEqual(summary["projects"], [])
+        self.assertIsNone(summary["total_cost"])
+
 
 if __name__ == "__main__":
     unittest.main()

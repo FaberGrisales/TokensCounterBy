@@ -22,7 +22,7 @@ ARCADE_LOGO = """
  [cyan]║[/]                [green]██║   ╚██████╔╝██║  ██╗███████╗[/]       [cyan]║[/]
  [cyan]║[/]                [green]╚═╝    ╚═════╝ ╚═╝  ╚═╝╚══════╝[/]       [cyan]║[/]
  [cyan]╚═══════════════════════════════════════════════════════╝[/]
-       [yellow]--==[ TOKEN PRICE MONITOR - RETRO TUI v1.0 ]==--[/]
+       [yellow]--==[ TOKEN MONITOR ]==--[/]
 """
 
 def play_beep():
@@ -40,7 +40,7 @@ def render_header():
     console.print()
 
 def render_menu(options):
-    """Renders an old-school BIOS/arcade style menu option list."""
+    """Renders the main menu option list."""
     table = Table(show_header=False, box=box.ROUNDED, border_style="cyan", padding=(0, 2))
     
     table.add_column("Key", style="bold yellow", justify="right")
@@ -51,7 +51,7 @@ def render_menu(options):
         
     console.print(Panel(
         table,
-        title="[bold magenta]SELECT GAME MODE[/]",
+        title="[bold magenta]MAIN MENU[/]",
         title_align="left",
         border_style="cyan",
         box=box.DOUBLE,
@@ -212,3 +212,81 @@ def render_session_monitor_view(sessions):
     footer = "[dim]Refreshing every few seconds · Press Ctrl+C to stop and return to the menu[/]"
 
     return Group(header, table, footer)
+
+def render_usage_summary(data):
+    """
+    Renders a snapshot modeled on Claude Code's own `/usage` command: total
+    cost and a "Usage by model" breakdown, plus a per-project breakdown this
+    app can offer since it sees every local session, not just the current
+    one. See session_monitor.get_global_usage_summary() for how it's built.
+    """
+    if not data["session_count"]:
+        console.print("[yellow]No Claude Code sessions found on this machine.[/]")
+        return
+
+    cost_str = f"${data['total_cost']:.4f}" if data["total_cost"] is not None else "[dim]N/A (no priced model found)[/]"
+    header = Panel(
+        f"[bold yellow]Sessions found:[/] {data['session_count']}   [bold yellow]Total Requests:[/] {data['total_requests']:,}\n"
+        f"[bold green]Total Estimated Cost:[/] {cost_str}",
+        title="[bold cyan]📊 GLOBAL CLAUDE USAGE (like /usage) 📊[/]",
+        border_style="cyan",
+        box=box.DOUBLE,
+        width=70
+    )
+    console.print(header, justify="center")
+    console.print()
+
+    # "Usage by model" — mirrors the list format /usage prints for the current session,
+    # but aggregated across every local session this app can find.
+    model_table = Table(box=box.ROUNDED, border_style="yellow", title="[bold yellow]Usage by Model[/]")
+    model_table.add_column("Model", style="bold green")
+    model_table.add_column("Input", justify="right")
+    model_table.add_column("Output", justify="right")
+    model_table.add_column("Cache Read", justify="right")
+    model_table.add_column("Cache Write", justify="right")
+    model_table.add_column("Cost", justify="right", style="bold yellow")
+
+    for m in data["usage_by_model"]:
+        cost_cell = f"${m['cost']:.4f}" if m["cost"] is not None else "[dim]N/A[/]"
+        model_table.add_row(
+            m["model"],
+            f"{m['input']:,}",
+            f"{m['output']:,}",
+            f"{m['cache_read']:,}",
+            f"{m['cache_write']:,}",
+            cost_cell
+        )
+    if not data["usage_by_model"]:
+        model_table.add_row("-", "-", "-", "-", "-", "-")
+
+    console.print(model_table, justify="center")
+    console.print()
+
+    # By project — /usage doesn't have this (it's scoped to one session), but
+    # this app sees every project's sessions, so it's a natural extension.
+    project_table = Table(box=box.ROUNDED, border_style="cyan", title="[bold cyan]By Project[/]")
+    project_table.add_column("Project", style="bold green")
+    project_table.add_column("Requests", justify="right")
+    project_table.add_column("Tokens (In / Out)", justify="right")
+    project_table.add_column("Est. Cost", justify="right", style="bold yellow")
+
+    for p in data["projects"]:
+        cost_cell = f"${p['cost']:.4f}" if p["cost"] is not None else "[dim]N/A[/]"
+        project_table.add_row(
+            p["project"],
+            f"{p['requests']:,}",
+            f"{p['input']:,} / {p['output']:,}",
+            cost_cell
+        )
+
+    console.print(project_table, justify="center")
+    console.print()
+
+    console.print(Panel(
+        "[dim]Cost is estimated locally from token counts via models_config.json — it may differ from your actual bill.\n"
+        "Unpriced models show N/A rather than $0. Plan-limit percentages (5h/weekly windows) aren't shown here: those\n"
+        "require a live call to Anthropic's usage endpoint, which only the real `/usage` command inside Claude Code can make.[/]",
+        border_style="dim", width=95
+    ), justify="center")
+    console.print()
+

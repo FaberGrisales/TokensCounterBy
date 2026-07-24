@@ -169,6 +169,7 @@ def build_session_summary(group, config_data, now=None):
         "project": main_path.parent.name,
         "cwd": cwd,
         "models": sorted(by_model.keys()),
+        "by_model": {model: dict(tokens) for model, tokens in by_model.items()},
         "main_requests": main_requests,
         "subagent_requests": subagent_requests,
         "subagent_count": len(subagent_paths),
@@ -195,6 +196,83 @@ def get_all_sessions(config_data, now=None):
             summaries.append(summary)
     summaries.sort(key=lambda s: s["mtime"], reverse=True)
     return summaries
+
+
+def get_global_usage_summary(config_data):
+    """
+    Aggregates every local session into a snapshot modeled on Claude Code's
+    own `/usage` command: a total cost and a "Usage by model" breakdown
+    (per-model input/output/cache-read/cache-write tokens and cost), plus a
+    per-project breakdown. Unlike `/usage` - which is scoped to the single
+    session it's run from - this covers every local session found under
+    ~/.claude/projects, since that's the "global" view this app can offer
+    from local transcripts alone. It cannot reproduce `/usage`'s plan-limit
+    percentage bars, which require a live call to Anthropic's usage endpoint.
+    """
+    sessions = get_all_sessions(config_data)
+
+    global_by_model = defaultdict(lambda: {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0})
+    by_project = defaultdict(lambda: {"cost": 0.0, "has_priced_model": False, "requests": 0, "input": 0, "output": 0})
+    total_requests = 0
+    last_timestamp = None
+
+    for s in sessions:
+        for model, tokens in s["by_model"].items():
+            bucket = global_by_model[model]
+            bucket["input"] += tokens["input"]
+            bucket["output"] += tokens["output"]
+            bucket["cache_read"] += tokens["cache_read"]
+            bucket["cache_write"] += tokens["cache_write"]
+
+        project_label = os.path.basename(s["cwd"]) if s.get("cwd") else s["project"]
+        project = by_project[project_label]
+        if s["cost"] is not None:
+            project["cost"] += s["cost"]
+            project["has_priced_model"] = True
+        session_requests = s["main_requests"] + s["subagent_requests"]
+        project["requests"] += session_requests
+        project["input"] += s["input_tokens"]
+        project["output"] += s["output_tokens"]
+
+        total_requests += session_requests
+        if s["last_timestamp"] and (last_timestamp is None or s["last_timestamp"] > last_timestamp):
+            last_timestamp = s["last_timestamp"]
+
+    usage_by_model = []
+    total_cost = 0.0
+    any_priced = False
+    for model, tokens in global_by_model.items():
+        cost = None
+        if model in config_data:
+            cost = calculate_call_cost(
+                model, tokens["input"], tokens["output"],
+                cached_read_tokens=tokens["cache_read"], cached_write_tokens=tokens["cache_write"]
+            )
+            total_cost += cost
+            any_priced = True
+        usage_by_model.append({"model": model, **tokens, "cost": cost})
+    usage_by_model.sort(key=lambda m: (m["cost"] or 0), reverse=True)
+
+    projects = [
+        {
+            "project": project,
+            "cost": data["cost"] if data["has_priced_model"] else None,
+            "requests": data["requests"],
+            "input": data["input"],
+            "output": data["output"]
+        }
+        for project, data in by_project.items()
+    ]
+    projects.sort(key=lambda p: (p["cost"] or 0), reverse=True)
+
+    return {
+        "session_count": len(sessions),
+        "total_requests": total_requests,
+        "total_cost": total_cost if any_priced else None,
+        "usage_by_model": usage_by_model,
+        "projects": projects,
+        "last_timestamp": last_timestamp
+    }
 
 
 def watch_sessions(config_data, refresh_seconds=3):

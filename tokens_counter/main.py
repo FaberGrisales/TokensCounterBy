@@ -12,7 +12,7 @@ import tokens_counter.tui as tui
 
 def select_model(config_data):
     """Submenu to select an LLM model."""
-    tui.console.print("\n[bold yellow]🕹️ SELECT YOUR FIGHTER (LLM Model) 🕹️[/]")
+    tui.console.print("\n[bold cyan]SELECT MODEL (LLM)[/]")
 
     models = list(config_data.keys())
     for i, m_key in enumerate(models):
@@ -37,7 +37,8 @@ def main():
         menu_options = {
             "1": "Call Live API (Requires keys)",
             "2": "Live Session Monitor (Claude Code usage 🔎)",
-            "3": "Exit Machine 🚪"
+            "3": "Global Claude Usage (like /usage 📊)",
+            "4": "Exit 🚪"
         }
 
         tui.render_menu(menu_options)
@@ -156,9 +157,21 @@ def main():
             input("\nPress Enter to return...")
 
         elif choice == "3":
+            # Global usage snapshot, modeled on Claude Code's own /usage
+            # command (see https://code.claude.com/docs/en/costs): total
+            # cost plus a "Usage by model" breakdown, aggregated across
+            # every local session instead of just the current one.
             tui.clear_screen()
-            tui.console.print("\n[bold yellow]GAME OVER. THANKS FOR PLAYING! 🕹️[/]")
-            tui.play_beep()
+            tui.console.print("[bold green]=== GLOBAL CLAUDE USAGE (like /usage) ===[/]\n")
+            tui.console.print("[dim]Analyzing local sessions under ~/.claude/projects ...[/]\n")
+
+            usage_data = session_monitor.get_global_usage_summary(config_data)
+            tui.render_usage_summary(usage_data)
+            input("\nPress Enter to return...")
+
+        elif choice == "4":
+            tui.clear_screen()
+            tui.console.print("\n[bold cyan]Exiting Token Monitor. Goodbye![/]")
             break
 
 if __name__ == "__main__":

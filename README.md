@@ -2,7 +2,7 @@
 
 Un monitor financiero de tokens para modelos de lenguaje (LLMs) como Claude y Gemini, diseñado con una interfaz de terminal (TUI) que imita una máquina de arcade clásica de 8 bits.
 
-Este proyecto está diseñado para ayudarte a visualizar exactamente cuánto dinero gastas en cada llamada a una API (incluyendo llamadas reales con herramientas / MCP en Claude), y ver en tiempo real qué sesiones de Claude Code están consumiendo tokens en tu máquina. Todos los números que ves vienen de una respuesta real de la API o de tus transcripts locales de Claude Code — no hay ningún modo simulado/estimado ni mecánicas de juego (billetera, monedas, high scores).
+Este proyecto está diseñado para ayudarte a visualizar exactamente cuánto dinero gastas en cada llamada a una API (incluyendo llamadas reales con herramientas / MCP en Claude), ver en tiempo real qué sesiones de Claude Code están consumiendo tokens en tu máquina, y revisar una foto fija de tu consumo global inspirada en el comando `/usage` de Claude Code. Todos los números que ves vienen de una respuesta real de la API o de tus transcripts locales de Claude Code — no hay ningún modo simulado/estimado ni mecánicas de juego (billetera, monedas, high scores).
 
 ---
 
@@ -33,7 +33,8 @@ Una vez iniciado, verás el menú principal con las siguientes opciones:
 
 1. **Call Live API (Requires keys)**: Realiza consultas reales a Claude o Gemini. Debes tener tus API keys configuradas (ver sección de abajo).
 2. **Live Session Monitor**: Ve en tiempo real qué sesiones de Claude Code están activas en esta máquina y cuánto está gastando cada una (ver sección de abajo).
-3. **Exit Machine**: Cierra la aplicación.
+3. **Global Claude Usage (like /usage)**: Una foto fija de tu consumo de Claude Code en esta máquina, inspirada en el comando real `/usage` de Claude Code (ver sección de abajo).
+4. **Exit**: Cierra la aplicación.
 
 Los precios por modelo viven en `tokens_counter/models_config.json` (editable a mano); ya no hay una pantalla de billetera/monedas ni un historial de llamadas dentro de la app — el costo de cada llamada real se muestra al momento, en la propia pantalla de resultado.
 
@@ -67,6 +68,18 @@ Presiona **Ctrl+C** para detener el monitor y volver al menú.
 - El costo se calcula con las tarifas de `tokens_counter/models_config.json`. Si una sesión usa un modelo que no está en esa tabla, su costo se muestra como `N/A` (los tokens sí se cuentan). Puedes agregar o ajustar precios editando ese archivo directamente.
 - Puedes apuntar el monitor a una ubicación distinta de `~/.claude` definiendo la variable de entorno `CLAUDE_CONFIG_DIR` antes de lanzar `start.py`, igual que hace Claude Code.
 - El formato interno de estos archivos `.jsonl` es un detalle de implementación de Claude Code y podría cambiar en versiones futuras; si eso ocurre, el monitor simplemente mostrará menos datos en vez de fallar.
+
+---
+
+## 📊 Global Claude Usage (Opción 3)
+
+Claude Code tiene su propio comando `/usage`, que muestra el costo y el desglose de tokens **de la sesión actual** ("Usage by model": tokens de entrada/salida/caché y costo por modelo — ver la [documentación oficial](https://code.claude.com/docs/en/costs#using-the-usage-command)). Esta opción hace lo mismo pero para **todas** las sesiones locales que encuentre en tu máquina, no solo la que tienes abierta:
+
+- **Total Estimated Cost** y **Total Requests**: sumados sobre todas las sesiones detectadas.
+- **Usage by Model**: la misma idea que la lista de `/usage` (`modelo: input, output, cache read, cache write ($costo)`), pero agregada globalmente.
+- **By Project**: desglose adicional por carpeta de proyecto (esto no existe en `/usage`, pero como esta app ve todas las sesiones a la vez, tiene sentido mostrarlo).
+
+**Limitación honesta:** esta opción **no** puede mostrar las barras de porcentaje de tu límite de plan (5 horas / semanal) que sí muestra `/usage` en cuentas Pro/Max/Team/Enterprise — esas requieren una llamada en vivo al endpoint de uso de Anthropic, algo que solo el comando real dentro de Claude Code puede hacer. Esta vista es 100% local, calculada a partir de tus transcripts, igual que la del **Live Session Monitor**.
 
 ---
 
