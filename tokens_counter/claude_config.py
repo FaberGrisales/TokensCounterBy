@@ -85,3 +85,47 @@ def get_hooks_config(project_dir=None):
             hooks.append({"scope": scope, **row})
 
     return hooks
+
+
+def get_subscription_status():
+    """
+    Reads locally-cached Claude account/plan metadata: ~/.claude.json's
+    `oauthAccount` block (org name/type, seat tier, extra-usage flag, trial
+    dates) and ~/.claude/.credentials.json's `claudeAiOauth` block (rate-limit
+    tier, subscription type). Deliberately never reads the access/refresh
+    token fields in either file - only the surrounding account metadata.
+
+    Returns None if there's no local Claude subscription session (e.g. this
+    machine only uses an ANTHROPIC_API_KEY, which has no oauthAccount at all).
+
+    This cannot report live usage-limit percentages (the 5h/weekly windows
+    shown by `/usage` on subscription plans): those require a live call to
+    Anthropic's usage endpoint that only Claude Code itself makes, and aren't
+    cached to disk anywhere this app can read.
+    """
+    user_config = _load_json(os.path.expanduser("~/.claude.json"))
+    oauth_account = user_config.get("oauthAccount") if isinstance(user_config, dict) else None
+    if not isinstance(oauth_account, dict):
+        return None
+
+    credentials = _load_json(get_claude_config_dir() / ".credentials.json")
+    oauth_creds = credentials.get("claudeAiOauth") if isinstance(credentials, dict) else None
+    rate_limit_tier = None
+    subscription_type = None
+    if isinstance(oauth_creds, dict):
+        rate_limit_tier = oauth_creds.get("rateLimitTier")
+        subscription_type = oauth_creds.get("subscriptionType")
+
+    return {
+        "email": oauth_account.get("emailAddress"),
+        "display_name": oauth_account.get("displayName"),
+        "organization_name": oauth_account.get("organizationName"),
+        "organization_type": oauth_account.get("organizationType"),
+        "seat_tier": oauth_account.get("seatTier"),
+        "subscription_type": subscription_type,
+        "billing_type": oauth_account.get("billingType"),
+        "rate_limit_tier": rate_limit_tier or oauth_account.get("organizationRateLimitTier"),
+        "has_extra_usage_enabled": bool(oauth_account.get("hasExtraUsageEnabled")),
+        "trial_ends_at": oauth_account.get("claudeCodeTrialEndsAt"),
+        "subscription_created_at": oauth_account.get("subscriptionCreatedAt"),
+    }

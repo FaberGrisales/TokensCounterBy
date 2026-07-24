@@ -316,6 +316,51 @@ class TestClaudeConfig(unittest.TestCase):
     def test_get_hooks_config_empty_when_no_settings(self):
         self.assertEqual(claude_config.get_hooks_config(project_dir=self.project_dir), [])
 
+    def test_get_subscription_status_reads_account_and_credentials(self):
+        with open(os.path.join(self.fake_home, ".claude.json"), "w") as f:
+            json.dump({
+                "oauthAccount": {
+                    "emailAddress": "dev@example.com",
+                    "displayName": "Dev",
+                    "organizationName": "Acme Corp",
+                    "organizationType": "claude_team",
+                    "seatTier": "team_standard",
+                    "billingType": "stripe_subscription",
+                    "hasExtraUsageEnabled": True,
+                    "claudeCodeTrialEndsAt": None,
+                    "subscriptionCreatedAt": "2026-01-01T00:00:00Z"
+                }
+            }, f)
+        with open(os.path.join(self.fake_claude_dir, ".credentials.json"), "w") as f:
+            json.dump({
+                "claudeAiOauth": {
+                    "accessToken": "should-never-be-read",
+                    "refreshToken": "should-never-be-read-either",
+                    "rateLimitTier": "default_raven",
+                    "subscriptionType": "team"
+                }
+            }, f)
+
+        status = claude_config.get_subscription_status()
+        self.assertEqual(status["email"], "dev@example.com")
+        self.assertEqual(status["organization_name"], "Acme Corp")
+        self.assertEqual(status["organization_type"], "claude_team")
+        self.assertEqual(status["rate_limit_tier"], "default_raven")
+        self.assertEqual(status["subscription_type"], "team")
+        self.assertTrue(status["has_extra_usage_enabled"])
+        # Must never surface the actual tokens.
+        self.assertNotIn("should-never-be-read", str(status))
+        self.assertNotIn("accessToken", status)
+        self.assertNotIn("refreshToken", status)
+
+    def test_get_subscription_status_none_when_no_oauth_account(self):
+        with open(os.path.join(self.fake_home, ".claude.json"), "w") as f:
+            json.dump({"someOtherKey": True}, f)
+        self.assertIsNone(claude_config.get_subscription_status())
+
+    def test_get_subscription_status_none_when_no_claude_json(self):
+        self.assertIsNone(claude_config.get_subscription_status())
+
 
 if __name__ == "__main__":
     unittest.main()

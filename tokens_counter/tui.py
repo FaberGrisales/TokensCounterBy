@@ -225,6 +225,49 @@ def render_session_monitor_view(sessions):
 
     return Group(header, table, footer)
 
+def render_subscription_status(status):
+    """
+    Renders Claude subscription/account status read from locally-cached OAuth
+    account metadata — never the access/refresh tokens themselves. See
+    claude_config.get_subscription_status() for exactly what's read.
+    """
+    if not status:
+        console.print(Panel(
+            "[yellow]No local Claude subscription session found.[/]\n"
+            "[dim]This shows up once you've logged in to Claude Code with a claude.ai account\n"
+            "(Pro/Max/Team/Enterprise). If this machine only uses an API key, there's nothing to read.[/]",
+            title="[bold cyan]👤 CLAUDE SUBSCRIPTION STATUS 👤[/]",
+            border_style="yellow", box=box.ROUNDED, width=90
+        ), justify="center")
+        console.print()
+        return
+
+    plan_label = status.get("organization_type") or status.get("subscription_type") or "unknown"
+    extra_usage = "[green]Enabled[/]" if status.get("has_extra_usage_enabled") else "[dim]Disabled[/]"
+
+    lines = [
+        f"[bold yellow]Account:[/] {status.get('display_name') or '-'} ({status.get('email') or '-'})",
+        f"[bold yellow]Organization:[/] {status.get('organization_name') or '-'}   "
+        f"[bold yellow]Plan:[/] {plan_label}   [bold yellow]Seat:[/] {status.get('seat_tier') or '-'}",
+        f"[bold yellow]Rate-limit tier:[/] {status.get('rate_limit_tier') or '-'}   [bold yellow]Extra usage:[/] {extra_usage}"
+    ]
+    if status.get("trial_ends_at"):
+        lines.append(f"[bold yellow]Trial ends:[/] {status['trial_ends_at']}")
+
+    console.print(Panel(
+        "\n".join(lines),
+        title="[bold cyan]👤 CLAUDE SUBSCRIPTION STATUS 👤[/]",
+        border_style="cyan", box=box.DOUBLE, width=90
+    ), justify="center")
+    console.print()
+    console.print(Panel(
+        "[dim]Real-time usage-limit percentages (5h/weekly windows) require a live call to Anthropic's usage endpoint —\n"
+        "only the `/usage` command inside Claude Code can show those bars. This reads locally-cached account\n"
+        "metadata only, never your access/refresh tokens.[/]",
+        border_style="dim", width=90
+    ), justify="center")
+    console.print()
+
 def render_usage_summary(data):
     """
     Renders a snapshot modeled on Claude Code's own `/usage` command: total
@@ -296,8 +339,7 @@ def render_usage_summary(data):
 
     console.print(Panel(
         "[dim]Cost is estimated locally from token counts via models_config.json — it may differ from your actual bill.\n"
-        "Unpriced models show N/A rather than $0. Plan-limit percentages (5h/weekly windows) aren't shown here: those\n"
-        "require a live call to Anthropic's usage endpoint, which only the real `/usage` command inside Claude Code can make.[/]",
+        "Unpriced models show N/A rather than $0. See Subscription Status above for plan/rate-limit-tier info.[/]",
         border_style="dim", width=95
     ), justify="center")
     console.print()
