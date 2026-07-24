@@ -22,7 +22,7 @@ ARCADE_LOGO = """
  [cyan]║[/][green]   ╚██████╗╚██████╔╝╚██████╔╝██║ ╚████║   ██║   ███████╗██║  ██║   [/][cyan]║[/]
  [cyan]║[/][green]    ╚═════╝ ╚═════╝  ╚═════╝ ╚═╝  ╚═══╝   ╚═╝   ╚══════╝╚═╝  ╚═╝   [/][cyan]║[/]
  [cyan]╚═══════════════════════════════════════════════════════════════════╝[/]
-                      [yellow]--==[ TOKEN COUNTER ]==--[/]
+        [yellow]--==[ TOKEN COUNTER ]==--[/]
 """
 
 def play_beep():
@@ -146,6 +146,39 @@ def _context_bar(percent, length=10):
     bar = "█" * filled + "░" * (length - filled)
     color = "green" if percent < 50 else "yellow" if percent < 80 else "red"
     return f"[{color}]{bar} {percent:.0f}%[/]"
+
+def _time_progress_bar(percent, length=10):
+    """
+    Compact bar for elapsed time within an estimated window, e.g. '██░░░░░░░░ 26%'.
+    Neutral color (not a red/green health indicator) since elapsed time by
+    itself isn't good or bad - it's just where you are in the window.
+    """
+    if percent is None:
+        return "[dim]N/A[/]"
+    ratio = min(1.0, max(0.0, percent / 100))
+    filled = int(round(ratio * length))
+    bar = "█" * filled + "░" * (length - filled)
+    return f"[cyan]{bar} {percent:.0f}%[/]"
+
+def _format_duration(seconds):
+    """Formats a duration in seconds as e.g. '1d 4h' or '3h 12m'."""
+    if seconds is None:
+        return "N/A"
+    seconds = int(max(0, seconds))
+    days, rem = divmod(seconds, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, _ = divmod(rem, 60)
+    if days:
+        return f"{days}d {hours}h"
+    if hours:
+        return f"{hours}h {minutes}m"
+    return f"{minutes}m"
+
+def _format_local_time(dt):
+    """Formats a UTC datetime as a local-time string, e.g. '2026-07-24 19:57 (local)'."""
+    if dt is None:
+        return "N/A"
+    return dt.astimezone().strftime("%Y-%m-%d %H:%M (local)")
 
 def render_session_monitor_view(sessions):
     """
@@ -285,12 +318,35 @@ def render_subscription_status(status, rolling_usage=None):
         console.print(window_table, justify="center")
         console.print()
 
+        estimate_table = Table(box=box.ROUNDED, border_style="blue", title="[bold blue]⏳ ESTIMATED SESSION WINDOW (local estimate) ⏳[/]")
+        estimate_table.add_column("Window", style="bold green")
+        estimate_table.add_column("Progress", justify="center")
+        estimate_table.add_column("Elapsed (est.)", justify="right")
+        estimate_table.add_column("Remaining (est.)", justify="right")
+        estimate_table.add_column("Resets around (est.)", justify="right")
+
+        for key, label in (("5h", "Current 5h window"), ("7d", "Current 7d window")):
+            w = rolling_usage.get(key, {})
+            estimate_table.add_row(
+                label,
+                _time_progress_bar(w.get("percent_elapsed")),
+                _format_duration(w.get("elapsed_seconds")),
+                _format_duration(w.get("remaining_seconds")),
+                _format_local_time(w.get("reset_at"))
+            )
+
+        console.print(estimate_table, justify="center")
+        console.print()
+
     console.print(Panel(
-        "[dim]\"Recent Consumption\" above is real usage summed from your local transcripts over rolling time windows —\n"
-        "it is NOT the same as Claude Code's actual quota-used percentage or reset countdown for its 5h/weekly seat\n"
-        "allowance. Those are computed server-side against a per-tier budget that isn't publicly documented and isn't\n"
-        "cached anywhere on this machine; only the real `/usage` command inside Claude Code can show that % and\n"
-        "reset time. This app never reads your access/refresh tokens either way.[/]",
+        "[dim]Both tables above are LOCAL ESTIMATES, not Claude Code's real quota-used percentage or reset countdown.\n"
+        "\"Recent Consumption\" sums real usage from your local transcripts over rolling time windows. \"Estimated\n"
+        "Session Window\" guesses when your current window started by looking for the last gap in local activity\n"
+        "longer than the window itself, then projects elapsed/remaining/reset time from that guess - it can be wrong\n"
+        "if you were idle on this machine but active elsewhere, or simply not match Anthropic's real server-side\n"
+        "window, which is computed against a per-tier budget that isn't publicly documented and isn't cached\n"
+        "anywhere on this machine. Only the real `/usage` command inside Claude Code can show the authoritative %\n"
+        "and reset time. This app never reads your access/refresh tokens either way.[/]",
         border_style="dim", width=95
     ), justify="center")
     console.print()

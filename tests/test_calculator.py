@@ -275,6 +275,45 @@ class TestSessionMonitor(unittest.TestCase):
         usage = session_monitor.get_rolling_window_usage(self.config_data)
         self.assertEqual(usage["5h"]["requests"], 0)
         self.assertIsNone(usage["5h"]["cost"])
+        self.assertIsNone(usage["5h"]["window_start"])
+        self.assertIsNone(usage["5h"]["reset_at"])
+        self.assertIsNone(usage["5h"]["percent_elapsed"])
+
+    def test_find_window_start_stops_at_gap(self):
+        now = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
+        # A burst of continuous activity (gaps < 5h) preceded by an old, isolated line.
+        timestamps = sorted([
+            now - timedelta(days=3),               # isolated, far in the past
+            now - timedelta(hours=4),               # start of the current streak
+            now - timedelta(hours=2),                # gap of 2h from previous - still < 5h
+            now - timedelta(minutes=10),
+        ])
+        window_start = session_monitor._find_window_start(timestamps, now, timedelta(hours=5))
+        self.assertEqual(window_start, now - timedelta(hours=4))
+
+    def test_find_window_start_none_when_no_timestamps(self):
+        self.assertIsNone(session_monitor._find_window_start([], datetime.now(timezone.utc), timedelta(hours=5)))
+
+    def test_get_rolling_window_usage_estimates_window_start_and_reset(self):
+        now = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
+        far_past_ts = (now - timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        streak_start_ts = (now - timedelta(hours=4)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        recent_ts = (now - timedelta(minutes=10)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+        self._write_session("proj-k", "session11", [
+            _usage_line("claude-3-5-sonnet", 10, 5, timestamp=far_past_ts),
+            _usage_line("claude-3-5-sonnet", 20, 6, timestamp=streak_start_ts),
+            _usage_line("claude-3-5-sonnet", 30, 7, timestamp=recent_ts),
+        ])
+
+        usage = session_monitor.get_rolling_window_usage(self.config_data, now=now)
+        w = usage["5h"]
+        expected_start = now - timedelta(hours=4)
+        self.assertEqual(w["window_start"], expected_start)
+        self.assertEqual(w["reset_at"], expected_start + timedelta(hours=5))
+        self.assertAlmostEqual(w["elapsed_seconds"], timedelta(hours=4).total_seconds())
+        self.assertAlmostEqual(w["remaining_seconds"], timedelta(hours=1).total_seconds())
+        self.assertAlmostEqual(w["percent_elapsed"], 80.0)
 
 
 class TestClaudeConfig(unittest.TestCase):
