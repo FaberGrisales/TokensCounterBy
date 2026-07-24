@@ -225,11 +225,13 @@ def render_session_monitor_view(sessions):
 
     return Group(header, table, footer)
 
-def render_subscription_status(status):
+def render_subscription_status(status, rolling_usage=None):
     """
     Renders Claude subscription/account status read from locally-cached OAuth
-    account metadata — never the access/refresh tokens themselves. See
-    claude_config.get_subscription_status() for exactly what's read.
+    account metadata — never the access/refresh tokens themselves — plus real
+    local consumption over rolling 5h/7d windows. See
+    claude_config.get_subscription_status() and
+    session_monitor.get_rolling_window_usage() for exactly what's read/computed.
     """
     if not status:
         console.print(Panel(
@@ -260,11 +262,36 @@ def render_subscription_status(status):
         border_style="cyan", box=box.DOUBLE, width=90
     ), justify="center")
     console.print()
+
+    if rolling_usage:
+        window_table = Table(box=box.ROUNDED, border_style="magenta", title="[bold magenta]⏱️ RECENT CONSUMPTION (local estimate) ⏱️[/]")
+        window_table.add_column("Window", style="bold green")
+        window_table.add_column("Requests", justify="right")
+        window_table.add_column("Tokens (In/Out)", justify="right")
+        window_table.add_column("Cache (Read/Write)", justify="right")
+        window_table.add_column("Est. Cost", justify="right", style="bold yellow")
+
+        for key, label in (("5h", "Last 5 hours"), ("7d", "Last 7 days")):
+            w = rolling_usage.get(key, {})
+            cost_str = f"${w['cost']:.4f}" if w.get("cost") is not None else "[dim]N/A[/]"
+            window_table.add_row(
+                label,
+                f"{w.get('requests', 0):,}",
+                f"{w.get('input', 0):,} / {w.get('output', 0):,}",
+                f"{w.get('cache_read', 0):,} / {w.get('cache_write', 0):,}",
+                cost_str
+            )
+
+        console.print(window_table, justify="center")
+        console.print()
+
     console.print(Panel(
-        "[dim]Real-time usage-limit percentages (5h/weekly windows) require a live call to Anthropic's usage endpoint —\n"
-        "only the `/usage` command inside Claude Code can show those bars. This reads locally-cached account\n"
-        "metadata only, never your access/refresh tokens.[/]",
-        border_style="dim", width=90
+        "[dim]\"Recent Consumption\" above is real usage summed from your local transcripts over rolling time windows —\n"
+        "it is NOT the same as Claude Code's actual quota-used percentage or reset countdown for its 5h/weekly seat\n"
+        "allowance. Those are computed server-side against a per-tier budget that isn't publicly documented and isn't\n"
+        "cached anywhere on this machine; only the real `/usage` command inside Claude Code can show that % and\n"
+        "reset time. This app never reads your access/refresh tokens either way.[/]",
+        border_style="dim", width=95
     ), justify="center")
     console.print()
 

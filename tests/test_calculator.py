@@ -4,6 +4,7 @@ import sys
 import shutil
 import tempfile
 import json
+from datetime import datetime, timedelta, timezone
 
 # Add package root to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -246,6 +247,34 @@ class TestSessionMonitor(unittest.TestCase):
         sessions = session_monitor.get_all_sessions(self.config_data)
         self.assertIsNone(sessions[0]["context_percent"])
         self.assertIsNone(sessions[0]["context_window"])
+
+    def test_get_rolling_window_usage_buckets_by_recency(self):
+        now = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
+        recent_ts = (now - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        mid_ts = (now - timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        old_ts = (now - timedelta(days=10)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+        self._write_session("proj-j", "session10", [
+            _usage_line("claude-3-5-sonnet", 100, 50, timestamp=recent_ts),
+            _usage_line("claude-3-5-sonnet", 200, 60, timestamp=mid_ts),
+            _usage_line("claude-3-5-sonnet", 400, 70, timestamp=old_ts),
+        ])
+
+        usage = session_monitor.get_rolling_window_usage(self.config_data, now=now)
+
+        # Only the 1-hour-old line falls inside the 5-hour window.
+        self.assertEqual(usage["5h"]["input"], 100)
+        self.assertEqual(usage["5h"]["requests"], 1)
+
+        # The 1-hour and 2-day-old lines fall inside the 7-day window; the 10-day-old one doesn't.
+        self.assertEqual(usage["7d"]["input"], 300)
+        self.assertEqual(usage["7d"]["requests"], 2)
+        self.assertIsNotNone(usage["7d"]["cost"])
+
+    def test_get_rolling_window_usage_empty_when_no_sessions(self):
+        usage = session_monitor.get_rolling_window_usage(self.config_data)
+        self.assertEqual(usage["5h"]["requests"], 0)
+        self.assertIsNone(usage["5h"]["cost"])
 
 
 class TestClaudeConfig(unittest.TestCase):

@@ -2,6 +2,7 @@ import os
 import json
 import time
 from collections import defaultdict
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from tokens_counter.config import calculate_call_cost
@@ -101,6 +102,21 @@ def _safe_mtime(path):
         return path.stat().st_mtime
     except OSError:
         return 0.0
+
+
+def _parse_timestamp(ts):
+    """Parse a transcript's ISO-8601 timestamp (e.g. '2026-01-01T00:00:00.000Z') into a UTC datetime, or None."""
+    if not ts:
+        return None
+    try:
+        if ts.endswith("Z"):
+            ts = ts[:-1] + "+00:00"
+        parsed = datetime.fromisoformat(ts)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed
+    except ValueError:
+        return None
 
 
 def build_session_summary(group, config_data, now=None):
@@ -289,6 +305,68 @@ def get_global_usage_summary(config_data):
         "usage_by_model": usage_by_model,
         "projects": projects,
         "last_timestamp": last_timestamp
+    }
+
+
+def get_rolling_window_usage(config_data, now=None):
+    """
+    Sums real local token/cost consumption across every local session (main +
+    subagents) within rolling 5-hour and 7-day windows measured from `now`.
+
+    This is deliberately NOT the same thing as Claude Code's actual quota-used
+    percentage or reset countdown for its 5h/weekly seat-allowance windows:
+    those are computed server-side against a per-tier budget that isn't
+    publicly documented and isn't cached to disk anywhere this app can read
+    (confirmed by inspecting ~/.claude.json, ~/.claude/.credentials.json, and
+    ~/.claude/policy-limits.json - none of them hold a usage-consumed number).
+    What this *can* honestly show is the real token/cost total Claude Code
+    itself would be counting during those same windows.
+    """
+    now = datetime.now(timezone.utc) if now is None else now
+    windows = {
+        "5h": {"cutoff": now - timedelta(hours=5)},
+        "7d": {"cutoff": now - timedelta(days=7)},
+    }
+    for w in windows.values():
+        w.update({"input": 0, "output": 0, "cache_read": 0, "cache_write": 0, "requests": 0, "cost": 0.0, "any_priced": False})
+
+    for group in find_session_groups():
+        for _, path in [(False, group["main"])] + [(True, p) for p in group["subagents"]]:
+            for usage_line in _iter_usage_lines(path):
+                ts = _parse_timestamp(usage_line["timestamp"])
+                if ts is None:
+                    continue
+
+                model = usage_line["model"]
+                cost = None
+                if model in config_data:
+                    cost = calculate_call_cost(
+                        model, usage_line["input_tokens"], usage_line["output_tokens"],
+                        cached_read_tokens=usage_line["cache_read_tokens"], cached_write_tokens=usage_line["cache_write_tokens"]
+                    )
+
+                for w in windows.values():
+                    if ts < w["cutoff"]:
+                        continue
+                    w["input"] += usage_line["input_tokens"]
+                    w["output"] += usage_line["output_tokens"]
+                    w["cache_read"] += usage_line["cache_read_tokens"]
+                    w["cache_write"] += usage_line["cache_write_tokens"]
+                    w["requests"] += 1
+                    if cost is not None:
+                        w["cost"] += cost
+                        w["any_priced"] = True
+
+    return {
+        key: {
+            "input": w["input"],
+            "output": w["output"],
+            "cache_read": w["cache_read"],
+            "cache_write": w["cache_write"],
+            "requests": w["requests"],
+            "cost": w["cost"] if w["any_priced"] else None
+        }
+        for key, w in windows.items()
     }
 
 

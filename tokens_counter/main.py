@@ -169,7 +169,8 @@ def main():
             tui.console.print("[dim]Analyzing local sessions under ~/.claude/projects ...[/]\n")
 
             subscription_status = claude_config.get_subscription_status()
-            tui.render_subscription_status(subscription_status)
+            rolling_usage = session_monitor.get_rolling_window_usage(config_data)
+            tui.render_subscription_status(subscription_status, rolling_usage)
 
             usage_data = session_monitor.get_global_usage_summary(config_data)
             tui.render_usage_summary(usage_data)
