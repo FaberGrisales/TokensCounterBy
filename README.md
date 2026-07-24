@@ -2,7 +2,7 @@
 
 Un monitor financiero de tokens para modelos de lenguaje (LLMs) como Claude y Gemini, diseñado con una interfaz de terminal (TUI) que imita una máquina de arcade clásica de 8 bits.
 
-Este proyecto está diseñado para ayudarte a visualizar exactamente cuánto dinero gastas en cada llamada a una API (incluyendo llamadas reales con herramientas / MCP en Claude), ver en tiempo real qué sesiones de Claude Code están consumiendo tokens en tu máquina, y revisar una foto fija de tu consumo global inspirada en el comando `/usage` de Claude Code. Todos los números que ves vienen de una respuesta real de la API o de tus transcripts locales de Claude Code — no hay ningún modo simulado/estimado ni mecánicas de juego (billetera, monedas, high scores).
+Este proyecto está diseñado para ayudarte a visualizar exactamente cuánto dinero gastas en cada llamada a una API (incluyendo llamadas reales con herramientas / MCP en Claude), ver en tiempo real qué sesiones de Claude Code están consumiendo tokens en tu máquina (incluyendo qué tan llena está su ventana de contexto), revisar una foto fija de tu consumo global inspirada en el comando `/usage` de Claude Code, y ver qué servidores MCP y hooks tienes configurados (como `/mcp` y `/hooks`). Todos los números que ves vienen de una respuesta real de la API o de tus transcripts/config locales de Claude Code — no hay ningún modo simulado/estimado ni mecánicas de juego (billetera, monedas, high scores).
 
 ---
 
@@ -32,9 +32,10 @@ python3 start.py
 Una vez iniciado, verás el menú principal con las siguientes opciones:
 
 1. **Call Live API (Requires keys)**: Realiza consultas reales a Claude o Gemini. Debes tener tus API keys configuradas (ver sección de abajo).
-2. **Live Session Monitor**: Ve en tiempo real qué sesiones de Claude Code están activas en esta máquina y cuánto está gastando cada una (ver sección de abajo).
+2. **Live Session Monitor**: Ve en tiempo real qué sesiones de Claude Code están activas en esta máquina, cuánto está gastando cada una, y qué tan llena está su ventana de contexto (ver sección de abajo).
 3. **Global Claude Usage (like /usage)**: Una foto fija de tu consumo de Claude Code en esta máquina, inspirada en el comando real `/usage` de Claude Code (ver sección de abajo).
-4. **Exit**: Cierra la aplicación.
+4. **Claude Code Config (MCP & Hooks)**: Qué servidores MCP y qué hooks tienes configurados para este proyecto, inspirado en los comandos `/mcp` y `/hooks` (ver sección de abajo).
+5. **Exit**: Cierra la aplicación.
 
 Los precios por modelo viven en `tokens_counter/models_config.json` (editable a mano); ya no hay una pantalla de billetera/monedas ni un historial de llamadas dentro de la app — el costo de cada llamada real se muestra al momento, en la propia pantalla de resultado.
 
@@ -61,6 +62,7 @@ Al entrar verás una tabla que se refresca sola cada pocos segundos con:
 - **Reqs**: número de turnos de la conversación principal, más cuántos subagentes/workflows lanzó (su consumo se suma al total de la sesión).
 - **Session Tokens / Session Cost**: acumulado de toda la sesión (conversación principal + subagentes).
 - **Last Prompt (in/out) / Last Prompt Cost**: tokens y costo del **último mensaje individual**, para ver en vivo cuánto cuesta cada petición a medida que la envías.
+- **Context**: barra de color con el porcentaje de la ventana de contexto del modelo que está ocupando la conversación en este momento (lo mismo que muestra `/context` dentro de Claude Code). Se calcula con los tokens del último mensaje (input + cache read + cache write) contra el `context_window` del modelo en `models_config.json`. Verde por debajo de 50%, amarillo hasta 80%, rojo por encima.
 
 Presiona **Ctrl+C** para detener el monitor y volver al menú.
 
@@ -80,6 +82,17 @@ Claude Code tiene su propio comando `/usage`, que muestra el costo y el desglose
 - **By Project**: desglose adicional por carpeta de proyecto (esto no existe en `/usage`, pero como esta app ve todas las sesiones a la vez, tiene sentido mostrarlo).
 
 **Limitación honesta:** esta opción **no** puede mostrar las barras de porcentaje de tu límite de plan (5 horas / semanal) que sí muestra `/usage` en cuentas Pro/Max/Team/Enterprise — esas requieren una llamada en vivo al endpoint de uso de Anthropic, algo que solo el comando real dentro de Claude Code puede hacer. Esta vista es 100% local, calculada a partir de tus transcripts, igual que la del **Live Session Monitor**.
+
+---
+
+## 🔧 Claude Code Config: MCP & Hooks (Opción 4)
+
+Inspirada en los comandos `/mcp` y `/hooks` de Claude Code. Muestra:
+
+- **Servidores MCP configurados**: leídos de `.mcp.json` en la raíz del proyecto (donde ejecutas `python3 start.py`) y de tu `~/.claude.json` (tanto servidores globales como los específicos de este proyecto).
+- **Hooks configurados**: leídos de `.claude/settings.json` y `.claude/settings.local.json` del proyecto, y de tu `~/.claude/settings.json` de usuario — evento, matcher, y cuántos comandos tiene cada hook.
+
+**Limitación honesta:** esta opción no lee políticas de configuración administradas a nivel de organización (managed settings / managed MCP), solo el alcance de proyecto + usuario. Como el resto de la app, es de solo lectura: nunca modifica tu configuración.
 
 ---
 

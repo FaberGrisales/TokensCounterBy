@@ -162,6 +162,20 @@ def build_session_summary(group, config_data, now=None):
             cached_read_tokens=last_request["cache_read_tokens"], cached_write_tokens=last_request["cache_write_tokens"]
         )
 
+    # Context window usage (mirrors what /context shows): the model bills
+    # input_tokens + cache_read_tokens + cache_write_tokens as the full prompt
+    # sent on the last turn, which is the best local proxy for how much of the
+    # conversation-so-far occupies the context window right now.
+    context_used_tokens = None
+    context_window = None
+    context_percent = None
+    if last_request:
+        context_used_tokens = last_request["input_tokens"] + last_request["cache_read_tokens"] + last_request["cache_write_tokens"]
+        model_cfg = config_data.get(last_request["model"])
+        if model_cfg and model_cfg.get("context_window"):
+            context_window = model_cfg["context_window"]
+            context_percent = min(100.0, (context_used_tokens / context_window) * 100)
+
     mtime = max([_safe_mtime(main_path)] + [_safe_mtime(p) for p in subagent_paths])
 
     return {
@@ -180,6 +194,9 @@ def build_session_summary(group, config_data, now=None):
         "cost": priced_cost if has_priced_model else None,
         "last_request": last_request,
         "last_request_cost": last_request_cost,
+        "context_used_tokens": context_used_tokens,
+        "context_window": context_window,
+        "context_percent": context_percent,
         "last_timestamp": last_timestamp,
         "mtime": mtime,
         "is_active": (now - mtime) <= ACTIVE_THRESHOLD_SECONDS

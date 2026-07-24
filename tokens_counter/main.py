@@ -8,6 +8,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from tokens_counter.config import load_config, calculate_call_cost
 from tokens_counter.live_client import LiveClientManager
 from tokens_counter import session_monitor
+from tokens_counter import claude_config
 import tokens_counter.tui as tui
 
 def select_model(config_data):
@@ -38,7 +39,8 @@ def main():
             "1": "Call Live API (Requires keys)",
             "2": "Live Session Monitor (Claude Code usage 🔎)",
             "3": "Global Claude Usage (like /usage 📊)",
-            "4": "Exit 🚪"
+            "4": "Claude Code Config (MCP & Hooks 🔧)",
+            "5": "Exit 🚪"
         }
 
         tui.render_menu(menu_options)
@@ -170,6 +172,18 @@ def main():
             input("\nPress Enter to return...")
 
         elif choice == "4":
+            # Configured MCP servers + hooks, modeled on the real /mcp and
+            # /hooks commands, read from this project's own config files.
+            tui.clear_screen()
+            tui.console.print("[bold green]=== CLAUDE CODE CONFIG (MCP & Hooks) ===[/]\n")
+            tui.console.print("[dim]Reading .mcp.json / .claude/settings*.json for this project ...[/]\n")
+
+            mcp_servers = claude_config.get_mcp_servers()
+            hooks = claude_config.get_hooks_config()
+            tui.render_claude_config(mcp_servers, hooks)
+            input("\nPress Enter to return...")
+
+        elif choice == "5":
             tui.clear_screen()
             tui.console.print("\n[bold cyan]Exiting Token Monitor. Goodbye![/]")
             break

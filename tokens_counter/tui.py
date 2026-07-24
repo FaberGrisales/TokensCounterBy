@@ -137,6 +137,16 @@ def render_mcp_live_results(model_key, prompt, res, cost):
     console.print(Panel(summary_text, title="[bold green]🪙 REAL MCP TRANSACTION RECEIPT 🪙[/]", border_style="green", box=box.ROUNDED, width=70), justify="center")
     console.print()
 
+def _context_bar(percent, length=10):
+    """Compact colored bar for context window usage, e.g. '███████░░░ 72%' (mirrors what /context shows)."""
+    if percent is None:
+        return "[dim]N/A[/]"
+    ratio = min(1.0, max(0.0, percent / 100))
+    filled = int(round(ratio * length))
+    bar = "█" * filled + "░" * (length - filled)
+    color = "green" if percent < 50 else "yellow" if percent < 80 else "red"
+    return f"[{color}]{bar} {percent:.0f}%[/]"
+
 def render_session_monitor_view(sessions):
     """
     Builds (does not print) a Rich renderable summarizing local Claude Code
@@ -176,6 +186,7 @@ def render_session_monitor_view(sessions):
     table.add_column("Session Cost", justify="right", style="bold yellow")
     table.add_column("Last Prompt (in/out)", justify="right")
     table.add_column("Last Prompt Cost", justify="right")
+    table.add_column("Context", justify="center")
 
     for s in sessions[:15]:
         status = "[bold green]● LIVE[/]" if s["is_active"] else "[dim]○ idle[/]"
@@ -203,11 +214,12 @@ def render_session_monitor_view(sessions):
             f"{s['input_tokens']:,} / {s['output_tokens']:,}",
             cost_str,
             last_tokens,
-            last_cost_str
+            last_cost_str,
+            _context_bar(s.get("context_percent"))
         )
 
     if not sessions:
-        table.add_row("-", "No local Claude Code sessions found", "-", "-", "-", "-", "-", "-")
+        table.add_row("-", "No local Claude Code sessions found", "-", "-", "-", "-", "-", "-", "-")
 
     footer = "[dim]Refreshing every few seconds · Press Ctrl+C to stop and return to the menu[/]"
 
@@ -286,6 +298,52 @@ def render_usage_summary(data):
         "[dim]Cost is estimated locally from token counts via models_config.json — it may differ from your actual bill.\n"
         "Unpriced models show N/A rather than $0. Plan-limit percentages (5h/weekly windows) aren't shown here: those\n"
         "require a live call to Anthropic's usage endpoint, which only the real `/usage` command inside Claude Code can make.[/]",
+        border_style="dim", width=95
+    ), justify="center")
+    console.print()
+
+def render_claude_config(mcp_servers, hooks):
+    """
+    Renders MCP servers and hooks configured for Claude Code, read from its
+    own local config files — the same data the real `/mcp` and `/hooks`
+    commands show, scoped to this project's directory and this user.
+    """
+    mcp_table = Table(box=box.ROUNDED, border_style="magenta", title="[bold magenta]🔌 MCP SERVERS CONFIGURED 🔌[/]")
+    mcp_table.add_column("Name", style="bold green")
+    mcp_table.add_column("Scope", style="cyan")
+    mcp_table.add_column("Type", style="yellow")
+    mcp_table.add_column("Command / URL", style="white")
+
+    for s in mcp_servers:
+        cfg = s.get("config") or {}
+        server_type = cfg.get("type", "stdio")
+        target = cfg.get("url") or cfg.get("command") or "-"
+        mcp_table.add_row(s["name"], s["scope"], server_type, str(target))
+
+    if not mcp_servers:
+        mcp_table.add_row("-", "No MCP servers found in .mcp.json or ~/.claude.json for this project", "-", "-")
+
+    console.print(mcp_table, justify="center")
+    console.print()
+
+    hooks_table = Table(box=box.ROUNDED, border_style="cyan", title="[bold cyan]🪝 HOOKS CONFIGURED 🪝[/]")
+    hooks_table.add_column("Scope", style="bold green")
+    hooks_table.add_column("Event", style="yellow")
+    hooks_table.add_column("Matcher", style="cyan")
+    hooks_table.add_column("Commands", justify="right")
+
+    for h in hooks:
+        hooks_table.add_row(h["scope"], h["event"], str(h["matcher"]), str(h["command_count"]))
+
+    if not hooks:
+        hooks_table.add_row("-", "No hooks found in settings.json (user/project/local)", "-", "-")
+
+    console.print(hooks_table, justify="center")
+    console.print()
+
+    console.print(Panel(
+        "[dim]Reads only this project's .mcp.json / .claude/settings*.json and your user-level ~/.claude.json /\n"
+        "~/.claude/settings.json. Organization-managed policy files aren't read by this app.[/]",
         border_style="dim", width=95
     ), justify="center")
     console.print()

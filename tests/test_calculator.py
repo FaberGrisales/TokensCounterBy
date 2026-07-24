@@ -11,6 +11,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from tokens_counter.config import calculate_call_cost, load_config
 from tokens_counter.mcp_tools import execute_tool, safe_arithmetic_eval
 from tokens_counter import session_monitor
+from tokens_counter import claude_config
 
 
 class TestTokensCalculator(unittest.TestCase):
@@ -227,6 +228,93 @@ class TestSessionMonitor(unittest.TestCase):
         self.assertEqual(summary["usage_by_model"], [])
         self.assertEqual(summary["projects"], [])
         self.assertIsNone(summary["total_cost"])
+
+    def test_get_all_sessions_context_percent(self):
+        self._write_session("proj-h", "session8", [
+            _usage_line("claude-3-5-sonnet", 1000, 200, cache_read=5000, cache_write=2000)
+        ])
+        sessions = session_monitor.get_all_sessions(self.config_data)
+        s = sessions[0]
+        expected_used = 1000 + 5000 + 2000
+        expected_window = self.config_data["claude-3-5-sonnet"]["context_window"]
+        self.assertEqual(s["context_used_tokens"], expected_used)
+        self.assertEqual(s["context_window"], expected_window)
+        self.assertAlmostEqual(s["context_percent"], expected_used / expected_window * 100)
+
+    def test_get_all_sessions_context_percent_none_for_unpriced_model(self):
+        self._write_session("proj-i", "session9", [_usage_line("some-unknown-future-model", 100, 50)])
+        sessions = session_monitor.get_all_sessions(self.config_data)
+        self.assertIsNone(sessions[0]["context_percent"])
+        self.assertIsNone(sessions[0]["context_window"])
+
+
+class TestClaudeConfig(unittest.TestCase):
+    """Tests for claude_config.py using synthetic project dirs / HOME, never the real ones."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.project_dir = os.path.join(self.temp_dir, "project")
+        self.fake_home = os.path.join(self.temp_dir, "home")
+        self.fake_claude_dir = os.path.join(self.temp_dir, "dot_claude")
+        os.makedirs(self.project_dir, exist_ok=True)
+        os.makedirs(self.fake_home, exist_ok=True)
+        os.makedirs(self.fake_claude_dir, exist_ok=True)
+
+        self._prev_config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+        self._prev_home = os.environ.get("HOME")
+        os.environ["CLAUDE_CONFIG_DIR"] = self.fake_claude_dir
+        os.environ["HOME"] = self.fake_home
+
+    def tearDown(self):
+        for var, prev in (("CLAUDE_CONFIG_DIR", self._prev_config_dir), ("HOME", self._prev_home)):
+            if prev is None:
+                os.environ.pop(var, None)
+            else:
+                os.environ[var] = prev
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_get_mcp_servers_reads_project_file(self):
+        with open(os.path.join(self.project_dir, ".mcp.json"), "w") as f:
+            json.dump({"mcpServers": {"filesystem": {"command": "npx", "args": ["-y", "pkg"]}}}, f)
+
+        servers = claude_config.get_mcp_servers(project_dir=self.project_dir)
+        self.assertEqual(len(servers), 1)
+        self.assertEqual(servers[0]["name"], "filesystem")
+        self.assertEqual(servers[0]["scope"], "project (.mcp.json)")
+
+    def test_get_mcp_servers_reads_user_file_and_per_project_entry(self):
+        with open(os.path.join(self.fake_home, ".claude.json"), "w") as f:
+            json.dump({
+                "mcpServers": {"global-tool": {"command": "global"}},
+                "projects": {self.project_dir: {"mcpServers": {"scoped-tool": {"command": "scoped"}}}}
+            }, f)
+
+        servers = claude_config.get_mcp_servers(project_dir=self.project_dir)
+        names = {s["name"] for s in servers}
+        self.assertEqual(names, {"global-tool", "scoped-tool"})
+
+    def test_get_mcp_servers_empty_when_no_config(self):
+        self.assertEqual(claude_config.get_mcp_servers(project_dir=self.project_dir), [])
+
+    def test_get_hooks_config_reads_project_and_user_settings(self):
+        project_claude_dir = os.path.join(self.project_dir, ".claude")
+        os.makedirs(project_claude_dir, exist_ok=True)
+        with open(os.path.join(project_claude_dir, "settings.json"), "w") as f:
+            json.dump({"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "echo hi"}]}]}}, f)
+
+        with open(os.path.join(self.fake_claude_dir, "settings.json"), "w") as f:
+            json.dump({"hooks": {"PostToolUse": [{"hooks": [{"type": "command", "command": "a"}, {"type": "command", "command": "b"}]}]}}, f)
+
+        hooks = claude_config.get_hooks_config(project_dir=self.project_dir)
+        by_scope = {h["scope"]: h for h in hooks}
+        self.assertEqual(by_scope["project"]["event"], "PreToolUse")
+        self.assertEqual(by_scope["project"]["matcher"], "Bash")
+        self.assertEqual(by_scope["project"]["command_count"], 1)
+        self.assertEqual(by_scope["user"]["event"], "PostToolUse")
+        self.assertEqual(by_scope["user"]["command_count"], 2)
+
+    def test_get_hooks_config_empty_when_no_settings(self):
+        self.assertEqual(claude_config.get_hooks_config(project_dir=self.project_dir), [])
 
 
 if __name__ == "__main__":
