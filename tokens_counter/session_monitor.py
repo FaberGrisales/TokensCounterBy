@@ -308,61 +308,42 @@ def get_global_usage_summary(config_data):
     }
 
 
-def _find_window_start(sorted_timestamps, now, duration):
-    """
-    Heuristic for "when did the current continuous stretch of activity begin":
-    walk backward from the most recent timestamp <= now, extending the window
-    start earlier as long as consecutive activity gaps stay under `duration`.
-    Stops at the first gap >= duration (an idle period long enough that a
-    fresh window would plausibly have started). Returns None with no data.
-
-    This is a local proxy for Claude Code's own 5h/weekly seat-allowance
-    window start, which Anthropic computes server-side and doesn't expose
-    anywhere this app can read - so it's an estimate, not the real value.
-    """
-    relevant = [t for t in sorted_timestamps if t <= now]
-    if not relevant:
-        return None
-    window_start = relevant[-1]
-    for i in range(len(relevant) - 1, 0, -1):
-        if relevant[i] - relevant[i - 1] >= duration:
-            break
-        window_start = relevant[i - 1]
-    return window_start
-
-
 def get_rolling_window_usage(config_data, now=None):
     """
     Sums real local token/cost consumption across every local session (main +
-    subagents) within rolling 5-hour and 7-day windows measured from `now`,
-    and separately estimates when the *current* continuous activity window
-    started, using `_find_window_start()`. From that estimated start it derives
-    an estimated elapsed time, remaining time, and reset time for each window.
+    subagents) within rolling 5-hour and 7-day windows measured from `now`.
 
-    Both pieces are deliberately NOT the same thing as Claude Code's actual
-    quota-used percentage or reset countdown for its 5h/weekly seat-allowance
-    windows: those are computed server-side against a per-tier budget that
-    isn't publicly documented and isn't cached to disk anywhere this app can
-    read (confirmed by inspecting ~/.claude.json, ~/.claude/.credentials.json,
-    and ~/.claude/policy-limits.json - none of them hold a usage-consumed
-    number or a reset timestamp). What this *can* honestly show is the real
-    token/cost total Claude Code itself would be counting during those same
-    windows, plus a best-effort local estimate of window timing.
+    This is deliberately NOT the same thing as Claude Code's actual quota-used
+    percentage or reset countdown for its 5h/weekly seat-allowance windows:
+    those are computed server-side against a per-tier budget that isn't
+    publicly documented and isn't cached to disk anywhere this app can read
+    (confirmed by inspecting ~/.claude.json, ~/.claude/.credentials.json, and
+    ~/.claude/policy-limits.json - none of them hold a usage-consumed number
+    or a reset timestamp). An earlier version of this function also tried to
+    estimate a window "start"/"elapsed"/"remaining"/"reset at" by treating the
+    last gap in local activity >= the window's duration as a session
+    boundary - that's a bad model for a genuinely *rolling* window (there is
+    no single reset moment; usage just ages out continuously), and in
+    practice it made the estimate collapse to "just started" after any
+    ordinary multi-hour break, which read as broken rather than useful. So
+    this function sticks to what's honestly knowable locally: the real
+    token/cost total Claude Code itself would be counting during those
+    windows, nothing more.
     """
     now = datetime.now(timezone.utc) if now is None else now
-    durations = {"5h": timedelta(hours=5), "7d": timedelta(days=7)}
-    windows = {key: {"cutoff": now - duration} for key, duration in durations.items()}
+    windows = {
+        "5h": {"cutoff": now - timedelta(hours=5)},
+        "7d": {"cutoff": now - timedelta(days=7)},
+    }
     for w in windows.values():
         w.update({"input": 0, "output": 0, "cache_read": 0, "cache_write": 0, "requests": 0, "cost": 0.0, "any_priced": False})
 
-    all_timestamps = []
     for group in find_session_groups():
         for _, path in [(False, group["main"])] + [(True, p) for p in group["subagents"]]:
             for usage_line in _iter_usage_lines(path):
                 ts = _parse_timestamp(usage_line["timestamp"])
                 if ts is None:
                     continue
-                all_timestamps.append(ts)
 
                 model = usage_line["model"]
                 cost = None
@@ -384,34 +365,17 @@ def get_rolling_window_usage(config_data, now=None):
                         w["cost"] += cost
                         w["any_priced"] = True
 
-    all_timestamps.sort()
-
-    result = {}
-    for key, w in windows.items():
-        duration = durations[key]
-        window_start = _find_window_start(all_timestamps, now, duration)
-
-        reset_at = elapsed_seconds = remaining_seconds = percent_elapsed = None
-        if window_start is not None:
-            reset_at = window_start + duration
-            elapsed_seconds = max(0.0, (now - window_start).total_seconds())
-            remaining_seconds = max(0.0, (reset_at - now).total_seconds())
-            percent_elapsed = min(100.0, (elapsed_seconds / duration.total_seconds()) * 100)
-
-        result[key] = {
+    return {
+        key: {
             "input": w["input"],
             "output": w["output"],
             "cache_read": w["cache_read"],
             "cache_write": w["cache_write"],
             "requests": w["requests"],
-            "cost": w["cost"] if w["any_priced"] else None,
-            "window_start": window_start,
-            "reset_at": reset_at,
-            "elapsed_seconds": elapsed_seconds,
-            "remaining_seconds": remaining_seconds,
-            "percent_elapsed": percent_elapsed
+            "cost": w["cost"] if w["any_priced"] else None
         }
-    return result
+        for key, w in windows.items()
+    }
 
 
 def watch_sessions(config_data, refresh_seconds=3):
