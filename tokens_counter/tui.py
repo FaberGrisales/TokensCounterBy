@@ -323,10 +323,10 @@ def _build_subscription_status_renderables(status, rolling_usage=None):
             )
         renderables.append(window_table)
 
-        usage_window_table = Table(box=box.ROUNDED, border_style="blue", title="[bold blue]📶 SESSION WINDOW USAGE (local estimate) 📶[/]")
+        usage_window_table = Table(box=box.ROUNDED, border_style="blue", title="[bold blue]📶 TIME-IN-WINDOW % (local, NOT your plan quota) 📶[/]")
         usage_window_table.add_column("Window", style="bold green")
         usage_window_table.add_column("Status", justify="center")
-        usage_window_table.add_column("Window Used %", justify="center")
+        usage_window_table.add_column("Time-in-Window %", justify="center")
         usage_window_table.add_column("Window Started", justify="right")
         usage_window_table.add_column("Time Elapsed", justify="right")
 
@@ -343,6 +343,10 @@ def _build_subscription_status_renderables(status, rolling_usage=None):
                     _format_duration(w.get("elapsed_seconds"))
                 )
         renderables.append(usage_window_table)
+        renderables.append(
+            "[dim]Time-in-Window % is real local elapsed time, NOT Claude Code's plan-quota %/usage limit "
+            "(that's computed server-side and requires a live account check this app doesn't make).[/]"
+        )
 
     return renderables
 
@@ -445,7 +449,7 @@ def render_global_usage_live_view(status, rolling_usage, data):
     """
     Builds (does not print) the combined Subscription Status + Global Usage
     renderables as a single Group, for use with rich.live.Live so the whole
-    screen (including Window Used %/Time Elapsed) refreshes in place instead
+    screen (including Time-in-Window %/Time Elapsed) refreshes in place instead
     of requiring the user to exit and re-run the menu option.
 
     Keeping this Group's height down matters: a Live renderable taller than

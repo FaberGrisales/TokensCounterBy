@@ -418,8 +418,8 @@ def watch_sessions(config_data, refresh_seconds=3):
 def watch_global_usage(config_data, refresh_seconds=5):
     """
     Render a live-updating view of subscription status + global usage
-    (Recent Consumption, Session Window Usage, Usage by Model, By Project)
-    until interrupted (Ctrl+C), so the Window Used %/Time Elapsed counters
+    (Recent Consumption, Time-in-Window %, Usage by Model, By Project)
+    until interrupted (Ctrl+C), so the Time-in-Window %/Time Elapsed counters
     visibly tick forward instead of requiring the user to exit and re-enter
     the menu option to see updated numbers.
 
