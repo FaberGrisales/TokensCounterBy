@@ -3,6 +3,7 @@ import os
 from rich.console import Console, Group
 from rich.panel import Panel
 from rich.table import Table
+from rich.text import Text
 from rich import box
 
 console = Console()
@@ -270,24 +271,34 @@ def render_session_monitor_view(sessions):
     return Group(header, table, footer)
 
 def _subscription_disclaimer():
-    """The static caveat text for Subscription Status / rolling-window estimates. Doesn't change between refreshes."""
+    """
+    The static caveat text for Subscription Status / rolling-window estimates.
+    Built as a left-justified Text (not a plain string) so it isn't affected
+    by the ambient justify="center" used when printing this panel - passing a
+    plain multi-line string lets that ambient justify re-center each line
+    independently within the panel's interior width, which mangles any line
+    shorter than the panel width (a real bug seen in practice, not
+    hypothetical - short trailing fragments floated to the middle of the box).
+    """
     return Panel(
-        "[dim]\"Recent Consumption\" sums real usage from your local transcripts over rolling time windows. \"Session\n"
-        "Window Usage\" finds the OLDEST request that still falls inside that window and shows how long it's been\n"
-        "sitting there as a % of the window's total duration - it grows the more continuously you keep using Claude\n"
-        "Code, and eases back down once that old activity ages out with nothing newer to replace it. This is NOT\n"
-        "Claude Code's quota-used percentage - it's a time-based proxy built from your own activity timestamps, since\n"
-        "the real quota-used % for the 5h/weekly seat allowance is computed server-side against a per-tier budget\n"
-        "that isn't publicly documented and isn't cached anywhere on this machine; only the real `/usage` command\n"
-        "inside Claude Code can show that authoritative %. This app never reads your access/refresh tokens either way.[/]",
+        Text(
+            "\"Session Window Usage\" is a real-elapsed-time estimate from your local transcripts, not Claude "
+            "Code's actual quota-used %/reset (that's computed server-side against an undocumented per-tier "
+            "budget and isn't cached on this machine - only the real `/usage` command shows it). This app never "
+            "reads your access/refresh tokens.",
+            style="dim", justify="left"
+        ),
         border_style="dim", width=95
     )
 
 def _usage_summary_disclaimer():
     """The static caveat text for the Global Usage cost breakdown. Doesn't change between refreshes."""
     return Panel(
-        "[dim]Cost is estimated locally from token counts via models_config.json — it may differ from your actual bill.\n"
-        "Unpriced models show N/A rather than $0. See Subscription Status above for plan/rate-limit-tier info.[/]",
+        Text(
+            "Cost is estimated locally from token counts via models_config.json and may differ from your actual "
+            "bill. Unpriced models show N/A rather than $0.",
+            style="dim", justify="left"
+        ),
         border_style="dim", width=95
     )
 
