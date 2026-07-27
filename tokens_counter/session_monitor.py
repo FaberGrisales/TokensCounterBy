@@ -405,11 +405,7 @@ def watch_sessions(config_data, refresh_seconds=3):
     from rich.live import Live
     from tokens_counter.tui import console, render_session_monitor_view
 
-    # vertical_overflow="visible": Live's default ("ellipsis") crops any
-    # renderable taller than the terminal, which cuts off table rows during
-    # live refreshes even though a normal one-shot print would show them all.
-    # "visible" lets the terminal scroll instead of silently truncating.
-    with Live(render_session_monitor_view(get_all_sessions(config_data)), console=console, refresh_per_second=4, vertical_overflow="visible") as live:
+    with Live(render_session_monitor_view(get_all_sessions(config_data)), console=console, refresh_per_second=4) as live:
         while True:
             time.sleep(refresh_seconds)
             live.update(render_session_monitor_view(get_all_sessions(config_data)))
@@ -422,12 +418,23 @@ def watch_global_usage(config_data, refresh_seconds=5):
     Project) until interrupted (Ctrl+C), so the Time Left %/Clears By/minute
     counters visibly tick forward instead of requiring the user to exit and
     re-enter the menu option to see updated numbers.
+
+    The two static disclaimer panels are printed once, before the Live loop
+    starts, instead of being part of the repeatedly-redrawn Group: they never
+    change between refreshes, and a Live renderable taller than the terminal
+    either gets silently cropped (the default "ellipsis" overflow) or, if
+    forced to vertical_overflow="visible", makes Live reprint the whole thing
+    on every refresh instead of redrawing in place - which is what made "By
+    Project" appear to scroll/duplicate endlessly in an earlier version of
+    this function. Keeping the live Group to just the numbers that actually
+    change (plus capping long tables - see tui.MAX_TABLE_ROWS) is the real
+    fix; Live's default overflow handling is left alone.
     """
     from rich.live import Live
     # Imported lazily (not at module load) to avoid a circular import, since
     # claude_config.py itself imports get_claude_config_dir from this module.
     from tokens_counter.claude_config import get_subscription_status
-    from tokens_counter.tui import console, render_global_usage_live_view
+    from tokens_counter.tui import console, render_global_usage_live_view, print_global_usage_disclaimers
 
     def snapshot():
         status = get_subscription_status()
@@ -435,14 +442,8 @@ def watch_global_usage(config_data, refresh_seconds=5):
         usage_data = get_global_usage_summary(config_data)
         return render_global_usage_live_view(status, rolling_usage, usage_data)
 
-    # vertical_overflow="visible": this view stacks several panels/tables
-    # (subscription status, recent consumption, window-clears, usage-by-model,
-    # by-project) and easily exceeds most terminal heights. Live's default
-    # ("ellipsis") crops anything past the terminal height - which is why
-    # e.g. "By Project" looked cut off mid-refresh but showed up fine once
-    # the loop exited and a normal, unconstrained print took over. "visible"
-    # lets the terminal scroll instead of silently truncating.
-    with Live(snapshot(), console=console, refresh_per_second=1, vertical_overflow="visible") as live:
+    print_global_usage_disclaimers()
+    with Live(snapshot(), console=console, refresh_per_second=1) as live:
         while True:
             time.sleep(refresh_seconds)
             live.update(snapshot())
