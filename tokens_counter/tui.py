@@ -147,6 +147,26 @@ def _context_bar(percent, length=10):
     color = "green" if percent < 50 else "yellow" if percent < 80 else "red"
     return f"[{color}]{bar} {percent:.0f}%[/]"
 
+def _format_duration(seconds):
+    """Formats a duration in seconds as e.g. '1d 4h' or '3h 12m'."""
+    if seconds is None:
+        return "N/A"
+    seconds = int(max(0, seconds))
+    days, rem = divmod(seconds, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, _ = divmod(rem, 60)
+    if days:
+        return f"{days}d {hours}h"
+    if hours:
+        return f"{hours}h {minutes}m"
+    return f"{minutes}m"
+
+def _format_local_time(dt):
+    """Formats a UTC datetime as a local-time string, e.g. '2026-07-24 19:57 (local)'."""
+    if dt is None:
+        return "N/A"
+    return dt.astimezone().strftime("%Y-%m-%d %H:%M (local)")
+
 def render_session_monitor_view(sessions):
     """
     Builds (does not print) a Rich renderable summarizing local Claude Code
@@ -285,12 +305,35 @@ def render_subscription_status(status, rolling_usage=None):
         console.print(window_table, justify="center")
         console.print()
 
+        clears_table = Table(box=box.ROUNDED, border_style="blue", title="[bold blue]⏳ WHEN YOUR CURRENT WINDOW CLEARS (local estimate) ⏳[/]")
+        clears_table.add_column("Window", style="bold green")
+        clears_table.add_column("Status", justify="center")
+        clears_table.add_column("Clears By (est.)", justify="right")
+        clears_table.add_column("Time Left (est.)", justify="right")
+
+        for key, label in (("5h", "5h window"), ("7d", "7d window")):
+            w = rolling_usage.get(key, {})
+            if w.get("last_activity_at") is None:
+                clears_table.add_row(label, "[dim]Empty (no recent activity)[/]", "-", "-")
+            else:
+                clears_table.add_row(
+                    label,
+                    "[green]Active[/]",
+                    _format_local_time(w.get("clears_at")),
+                    _format_duration(w.get("remaining_seconds"))
+                )
+
+        console.print(clears_table, justify="center")
+        console.print()
+
     console.print(Panel(
-        "[dim]\"Recent Consumption\" above is real usage summed from your local transcripts over rolling time windows —\n"
-        "it is NOT the same as Claude Code's actual quota-used percentage or reset countdown for its 5h/weekly seat\n"
-        "allowance. Those are computed server-side against a per-tier budget that isn't publicly documented and isn't\n"
-        "cached anywhere on this machine; only the real `/usage` command inside Claude Code can show that % and\n"
-        "reset time. This app never reads your access/refresh tokens either way.[/]",
+        "[dim]\"Recent Consumption\" sums real usage from your local transcripts over rolling time windows. \"When Your\n"
+        "Current Window Clears\" shows when your MOST RECENT request in that window will age out of it, if you don't\n"
+        "use Claude Code again before then - use it again and this time moves forward. Neither is Claude Code's actual\n"
+        "quota-used percentage or reset countdown for its 5h/weekly seat allowance: that's computed server-side\n"
+        "against a per-tier budget that isn't publicly documented and isn't cached anywhere on this machine; only the\n"
+        "real `/usage` command inside Claude Code can show that authoritative % and reset time. This app never reads\n"
+        "your access/refresh tokens either way.[/]",
         border_style="dim", width=95
     ), justify="center")
     console.print()

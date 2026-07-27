@@ -311,7 +311,8 @@ def get_global_usage_summary(config_data):
 def get_rolling_window_usage(config_data, now=None):
     """
     Sums real local token/cost consumption across every local session (main +
-    subagents) within rolling 5-hour and 7-day windows measured from `now`.
+    subagents) within rolling 5-hour and 7-day windows measured from `now`,
+    and derives when the window's currently-counted usage would fully clear.
 
     This is deliberately NOT the same thing as Claude Code's actual quota-used
     percentage or reset countdown for its 5h/weekly seat-allowance windows:
@@ -319,24 +320,30 @@ def get_rolling_window_usage(config_data, now=None):
     publicly documented and isn't cached to disk anywhere this app can read
     (confirmed by inspecting ~/.claude.json, ~/.claude/.credentials.json, and
     ~/.claude/policy-limits.json - none of them hold a usage-consumed number
-    or a reset timestamp). An earlier version of this function also tried to
-    estimate a window "start"/"elapsed"/"remaining"/"reset at" by treating the
+    or a reset timestamp).
+
+    An earlier version tried to estimate a window "start" by treating the
     last gap in local activity >= the window's duration as a session
     boundary - that's a bad model for a genuinely *rolling* window (there is
     no single reset moment; usage just ages out continuously), and in
     practice it made the estimate collapse to "just started" after any
-    ordinary multi-hour break, which read as broken rather than useful. So
-    this function sticks to what's honestly knowable locally: the real
-    token/cost total Claude Code itself would be counting during those
-    windows, nothing more.
+    ordinary multi-hour break. This version instead tracks the single most
+    recent activity timestamp that currently falls inside each window
+    (`last_activity_at`) and projects when *that* specific request will age
+    out of the window (`clears_at` = `last_activity_at` + duration). That's
+    always well-defined from real data: if there's no activity in the window
+    right now, `clears_at` is None (the window is genuinely already empty -
+    nothing to count down). If you keep using Claude Code, `clears_at` keeps
+    moving forward with your latest activity; it only counts down toward
+    "fully clear" while you stay idle.
     """
     now = datetime.now(timezone.utc) if now is None else now
     windows = {
-        "5h": {"cutoff": now - timedelta(hours=5)},
-        "7d": {"cutoff": now - timedelta(days=7)},
+        "5h": {"cutoff": now - timedelta(hours=5), "duration": timedelta(hours=5)},
+        "7d": {"cutoff": now - timedelta(days=7), "duration": timedelta(days=7)},
     }
     for w in windows.values():
-        w.update({"input": 0, "output": 0, "cache_read": 0, "cache_write": 0, "requests": 0, "cost": 0.0, "any_priced": False})
+        w.update({"input": 0, "output": 0, "cache_read": 0, "cache_write": 0, "requests": 0, "cost": 0.0, "any_priced": False, "last_activity_at": None})
 
     for group in find_session_groups():
         for _, path in [(False, group["main"])] + [(True, p) for p in group["subagents"]]:
@@ -354,7 +361,7 @@ def get_rolling_window_usage(config_data, now=None):
                     )
 
                 for w in windows.values():
-                    if ts < w["cutoff"]:
+                    if ts < w["cutoff"] or ts > now:
                         continue
                     w["input"] += usage_line["input_tokens"]
                     w["output"] += usage_line["output_tokens"]
@@ -364,18 +371,28 @@ def get_rolling_window_usage(config_data, now=None):
                     if cost is not None:
                         w["cost"] += cost
                         w["any_priced"] = True
+                    if w["last_activity_at"] is None or ts > w["last_activity_at"]:
+                        w["last_activity_at"] = ts
 
-    return {
-        key: {
+    result = {}
+    for key, w in windows.items():
+        clears_at = remaining_seconds = None
+        if w["last_activity_at"] is not None:
+            clears_at = w["last_activity_at"] + w["duration"]
+            remaining_seconds = max(0.0, (clears_at - now).total_seconds())
+
+        result[key] = {
             "input": w["input"],
             "output": w["output"],
             "cache_read": w["cache_read"],
             "cache_write": w["cache_write"],
             "requests": w["requests"],
-            "cost": w["cost"] if w["any_priced"] else None
+            "cost": w["cost"] if w["any_priced"] else None,
+            "last_activity_at": w["last_activity_at"],
+            "clears_at": clears_at,
+            "remaining_seconds": remaining_seconds
         }
-        for key, w in windows.items()
-    }
+    return result
 
 
 def watch_sessions(config_data, refresh_seconds=3):

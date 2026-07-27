@@ -275,6 +275,47 @@ class TestSessionMonitor(unittest.TestCase):
         usage = session_monitor.get_rolling_window_usage(self.config_data)
         self.assertEqual(usage["5h"]["requests"], 0)
         self.assertIsNone(usage["5h"]["cost"])
+        self.assertIsNone(usage["5h"]["last_activity_at"])
+        self.assertIsNone(usage["5h"]["clears_at"])
+        self.assertIsNone(usage["5h"]["remaining_seconds"])
+
+    def test_get_rolling_window_usage_clears_at_tracks_most_recent_activity(self):
+        now = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
+        older_ts = (now - timedelta(hours=3)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        newest_ts = (now - timedelta(minutes=10)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+        self._write_session("proj-k", "session11", [
+            _usage_line("claude-3-5-sonnet", 100, 50, timestamp=older_ts),
+            _usage_line("claude-3-5-sonnet", 200, 60, timestamp=newest_ts),
+        ])
+
+        usage = session_monitor.get_rolling_window_usage(self.config_data, now=now)
+        w = usage["5h"]
+
+        # clears_at must anchor to the NEWEST activity in the window, not the oldest
+        # or some gap-based guess - the window keeps counting until its most recent
+        # entry ages out.
+        expected_newest = now - timedelta(minutes=10)
+        self.assertEqual(w["last_activity_at"], expected_newest)
+        self.assertEqual(w["clears_at"], expected_newest + timedelta(hours=5))
+        self.assertAlmostEqual(w["remaining_seconds"], (timedelta(hours=5) - timedelta(minutes=10)).total_seconds())
+
+    def test_get_rolling_window_usage_empty_window_after_long_gap(self):
+        now = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
+        far_past_ts = (now - timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+        self._write_session("proj-l", "session12", [
+            _usage_line("claude-3-5-sonnet", 100, 50, timestamp=far_past_ts),
+        ])
+
+        usage = session_monitor.get_rolling_window_usage(self.config_data, now=now)
+        w = usage["5h"]
+
+        # Nothing in the last 5h -> genuinely empty, not a fabricated "just started" guess.
+        self.assertEqual(w["requests"], 0)
+        self.assertIsNone(w["last_activity_at"])
+        self.assertIsNone(w["clears_at"])
+        self.assertIsNone(w["remaining_seconds"])
 
 
 class TestClaudeConfig(unittest.TestCase):
