@@ -278,6 +278,7 @@ class TestSessionMonitor(unittest.TestCase):
         self.assertIsNone(usage["5h"]["last_activity_at"])
         self.assertIsNone(usage["5h"]["clears_at"])
         self.assertIsNone(usage["5h"]["remaining_seconds"])
+        self.assertIsNone(usage["5h"]["percent_remaining"])
 
     def test_get_rolling_window_usage_clears_at_tracks_most_recent_activity(self):
         now = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
@@ -299,6 +300,8 @@ class TestSessionMonitor(unittest.TestCase):
         self.assertEqual(w["last_activity_at"], expected_newest)
         self.assertEqual(w["clears_at"], expected_newest + timedelta(hours=5))
         self.assertAlmostEqual(w["remaining_seconds"], (timedelta(hours=5) - timedelta(minutes=10)).total_seconds())
+        # 4h50m left out of a 5h window = 96.67%
+        self.assertAlmostEqual(w["percent_remaining"], 96.66666666666667)
 
     def test_get_rolling_window_usage_empty_window_after_long_gap(self):
         now = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc)

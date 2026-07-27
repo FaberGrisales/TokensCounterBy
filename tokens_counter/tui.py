@@ -147,6 +147,19 @@ def _context_bar(percent, length=10):
     color = "green" if percent < 50 else "yellow" if percent < 80 else "red"
     return f"[{color}]{bar} {percent:.0f}%[/]"
 
+def _neutral_bar(percent, length=10):
+    """
+    Compact bar with no red/green health semantics, e.g. '████░░░░░░ 40%'.
+    Used for values where "high" isn't good or bad by itself (e.g. time
+    remaining until a rolling window clears - low is actually good news).
+    """
+    if percent is None:
+        return "[dim]N/A[/]"
+    ratio = min(1.0, max(0.0, percent / 100))
+    filled = int(round(ratio * length))
+    bar = "█" * filled + "░" * (length - filled)
+    return f"[cyan]{bar} {percent:.0f}%[/]"
+
 def _format_duration(seconds):
     """Formats a duration in seconds as e.g. '1d 4h' or '3h 12m'."""
     if seconds is None:
@@ -308,17 +321,19 @@ def render_subscription_status(status, rolling_usage=None):
         clears_table = Table(box=box.ROUNDED, border_style="blue", title="[bold blue]⏳ WHEN YOUR CURRENT WINDOW CLEARS (local estimate) ⏳[/]")
         clears_table.add_column("Window", style="bold green")
         clears_table.add_column("Status", justify="center")
+        clears_table.add_column("Time Left %", justify="center")
         clears_table.add_column("Clears By (est.)", justify="right")
         clears_table.add_column("Time Left (est.)", justify="right")
 
         for key, label in (("5h", "5h window"), ("7d", "7d window")):
             w = rolling_usage.get(key, {})
             if w.get("last_activity_at") is None:
-                clears_table.add_row(label, "[dim]Empty (no recent activity)[/]", "-", "-")
+                clears_table.add_row(label, "[dim]Empty (no recent activity)[/]", "[dim]N/A[/]", "-", "-")
             else:
                 clears_table.add_row(
                     label,
                     "[green]Active[/]",
+                    _neutral_bar(w.get("percent_remaining")),
                     _format_local_time(w.get("clears_at")),
                     _format_duration(w.get("remaining_seconds"))
                 )
@@ -329,11 +344,13 @@ def render_subscription_status(status, rolling_usage=None):
     console.print(Panel(
         "[dim]\"Recent Consumption\" sums real usage from your local transcripts over rolling time windows. \"When Your\n"
         "Current Window Clears\" shows when your MOST RECENT request in that window will age out of it, if you don't\n"
-        "use Claude Code again before then - use it again and this time moves forward. Neither is Claude Code's actual\n"
-        "quota-used percentage or reset countdown for its 5h/weekly seat allowance: that's computed server-side\n"
-        "against a per-tier budget that isn't publicly documented and isn't cached anywhere on this machine; only the\n"
-        "real `/usage` command inside Claude Code can show that authoritative % and reset time. This app never reads\n"
-        "your access/refresh tokens either way.[/]",
+        "use Claude Code again before then - use it again and this time moves forward. \"Time Left %\" is that same\n"
+        "countdown expressed as a % of the window's total duration - it is NOT Claude Code's quota-used percentage;\n"
+        "a low Time Left % just means your last activity is close to aging out (which is good news, not bad). Neither\n"
+        "table reproduces Claude Code's actual quota-used percentage or reset countdown for its 5h/weekly seat\n"
+        "allowance: that's computed server-side against a per-tier budget that isn't publicly documented and isn't\n"
+        "cached anywhere on this machine; only the real `/usage` command inside Claude Code can show that\n"
+        "authoritative % and reset time. This app never reads your access/refresh tokens either way.[/]",
         border_style="dim", width=95
     ), justify="center")
     console.print()

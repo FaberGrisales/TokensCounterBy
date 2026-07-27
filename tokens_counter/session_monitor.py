@@ -335,7 +335,10 @@ def get_rolling_window_usage(config_data, now=None):
     right now, `clears_at` is None (the window is genuinely already empty -
     nothing to count down). If you keep using Claude Code, `clears_at` keeps
     moving forward with your latest activity; it only counts down toward
-    "fully clear" while you stay idle.
+    "fully clear" while you stay idle. `percent_remaining` expresses
+    `remaining_seconds` as a % of the window's total duration - this is a
+    countdown-to-clear percentage, NOT Claude Code's quota-used percentage
+    (there's no way to compute that locally; see above).
     """
     now = datetime.now(timezone.utc) if now is None else now
     windows = {
@@ -376,10 +379,11 @@ def get_rolling_window_usage(config_data, now=None):
 
     result = {}
     for key, w in windows.items():
-        clears_at = remaining_seconds = None
+        clears_at = remaining_seconds = percent_remaining = None
         if w["last_activity_at"] is not None:
             clears_at = w["last_activity_at"] + w["duration"]
             remaining_seconds = max(0.0, (clears_at - now).total_seconds())
+            percent_remaining = min(100.0, (remaining_seconds / w["duration"].total_seconds()) * 100)
 
         result[key] = {
             "input": w["input"],
@@ -390,7 +394,8 @@ def get_rolling_window_usage(config_data, now=None):
             "cost": w["cost"] if w["any_priced"] else None,
             "last_activity_at": w["last_activity_at"],
             "clears_at": clears_at,
-            "remaining_seconds": remaining_seconds
+            "remaining_seconds": remaining_seconds,
+            "percent_remaining": percent_remaining
         }
     return result
 
