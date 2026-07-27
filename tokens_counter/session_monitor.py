@@ -312,33 +312,38 @@ def get_rolling_window_usage(config_data, now=None):
     """
     Sums real local token/cost consumption across every local session (main +
     subagents) within rolling 5-hour and 7-day windows measured from `now`,
-    and derives when the window's currently-counted usage would fully clear.
+    and reports how much of each window's timespan is currently occupied by
+    continuous real activity.
 
     This is deliberately NOT the same thing as Claude Code's actual quota-used
-    percentage or reset countdown for its 5h/weekly seat-allowance windows:
-    those are computed server-side against a per-tier budget that isn't
-    publicly documented and isn't cached to disk anywhere this app can read
-    (confirmed by inspecting ~/.claude.json, ~/.claude/.credentials.json, and
-    ~/.claude/policy-limits.json - none of them hold a usage-consumed number
-    or a reset timestamp).
+    percentage for its 5h/weekly seat-allowance windows: that's computed
+    server-side against a per-tier budget that isn't publicly documented and
+    isn't cached to disk anywhere this app can read (confirmed by inspecting
+    ~/.claude.json, ~/.claude/.credentials.json, and ~/.claude/policy-limits.json
+    - none of them hold a usage-consumed number or a reset timestamp).
 
-    An earlier version tried to estimate a window "start" by treating the
-    last gap in local activity >= the window's duration as a session
-    boundary - that's a bad model for a genuinely *rolling* window (there is
-    no single reset moment; usage just ages out continuously), and in
-    practice it made the estimate collapse to "just started" after any
-    ordinary multi-hour break. This version instead tracks the single most
-    recent activity timestamp that currently falls inside each window
-    (`last_activity_at`) and projects when *that* specific request will age
-    out of the window (`clears_at` = `last_activity_at` + duration). That's
-    always well-defined from real data: if there's no activity in the window
-    right now, `clears_at` is None (the window is genuinely already empty -
-    nothing to count down). If you keep using Claude Code, `clears_at` keeps
-    moving forward with your latest activity; it only counts down toward
-    "fully clear" while you stay idle. `percent_remaining` expresses
-    `remaining_seconds` as a % of the window's total duration - this is a
-    countdown-to-clear percentage, NOT Claude Code's quota-used percentage
-    (there's no way to compute that locally; see above).
+    Two earlier versions of this function got the framing wrong:
+    - The first tried to guess a window "start" from the last activity gap >=
+      the window's duration, which collapsed to "just started" after any
+      ordinary multi-hour break.
+    - The second anchored to the MOST RECENT activity and counted down to
+      when it would age out of the window. That's mathematically sound, but
+      it means every new request during an active session pushes the
+      countdown back out toward the full window duration - so while you're
+      actively working, the countdown never visibly decreases. It also
+      framed the number backwards from what "how much of my window have I
+      used" should mean.
+
+    This version instead finds the OLDEST activity that currently still
+    falls inside the window (`window_start_at`) and reports how long it's
+    been sitting there: `elapsed_seconds` = `now - window_start_at` (capped
+    at the window's duration), expressed as `percent_used` of that duration.
+    This grows the more continuously you keep using Claude Code (a real,
+    non-fabricated fact from your own transcripts) instead of resetting
+    every time you send a new message, and it naturally drops back down once
+    that oldest request itself ages out with nothing newer to replace it. An
+    empty window (no activity at all in range) reports None throughout
+    rather than fabricating a value.
     """
     now = datetime.now(timezone.utc) if now is None else now
     windows = {
@@ -346,7 +351,7 @@ def get_rolling_window_usage(config_data, now=None):
         "7d": {"cutoff": now - timedelta(days=7), "duration": timedelta(days=7)},
     }
     for w in windows.values():
-        w.update({"input": 0, "output": 0, "cache_read": 0, "cache_write": 0, "requests": 0, "cost": 0.0, "any_priced": False, "last_activity_at": None})
+        w.update({"input": 0, "output": 0, "cache_read": 0, "cache_write": 0, "requests": 0, "cost": 0.0, "any_priced": False, "window_start_at": None})
 
     for group in find_session_groups():
         for _, path in [(False, group["main"])] + [(True, p) for p in group["subagents"]]:
@@ -374,16 +379,16 @@ def get_rolling_window_usage(config_data, now=None):
                     if cost is not None:
                         w["cost"] += cost
                         w["any_priced"] = True
-                    if w["last_activity_at"] is None or ts > w["last_activity_at"]:
-                        w["last_activity_at"] = ts
+                    if w["window_start_at"] is None or ts < w["window_start_at"]:
+                        w["window_start_at"] = ts
 
     result = {}
     for key, w in windows.items():
-        clears_at = remaining_seconds = percent_remaining = None
-        if w["last_activity_at"] is not None:
-            clears_at = w["last_activity_at"] + w["duration"]
-            remaining_seconds = max(0.0, (clears_at - now).total_seconds())
-            percent_remaining = min(100.0, (remaining_seconds / w["duration"].total_seconds()) * 100)
+        elapsed_seconds = percent_used = None
+        if w["window_start_at"] is not None:
+            duration_seconds = w["duration"].total_seconds()
+            elapsed_seconds = min(duration_seconds, max(0.0, (now - w["window_start_at"]).total_seconds()))
+            percent_used = min(100.0, (elapsed_seconds / duration_seconds) * 100)
 
         result[key] = {
             "input": w["input"],
@@ -392,10 +397,9 @@ def get_rolling_window_usage(config_data, now=None):
             "cache_write": w["cache_write"],
             "requests": w["requests"],
             "cost": w["cost"] if w["any_priced"] else None,
-            "last_activity_at": w["last_activity_at"],
-            "clears_at": clears_at,
-            "remaining_seconds": remaining_seconds,
-            "percent_remaining": percent_remaining
+            "window_start_at": w["window_start_at"],
+            "elapsed_seconds": elapsed_seconds,
+            "percent_used": percent_used
         }
     return result
 
@@ -414,10 +418,10 @@ def watch_sessions(config_data, refresh_seconds=3):
 def watch_global_usage(config_data, refresh_seconds=5):
     """
     Render a live-updating view of subscription status + global usage
-    (Recent Consumption, When Your Current Window Clears, Usage by Model, By
-    Project) until interrupted (Ctrl+C), so the Time Left %/Clears By/minute
-    counters visibly tick forward instead of requiring the user to exit and
-    re-enter the menu option to see updated numbers.
+    (Recent Consumption, Session Window Usage, Usage by Model, By Project)
+    until interrupted (Ctrl+C), so the Window Used %/Time Elapsed counters
+    visibly tick forward instead of requiring the user to exit and re-enter
+    the menu option to see updated numbers.
 
     The two static disclaimer panels are printed once, before the Live loop
     starts, instead of being part of the repeatedly-redrawn Group: they never

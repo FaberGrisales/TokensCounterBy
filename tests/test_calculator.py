@@ -275,12 +275,11 @@ class TestSessionMonitor(unittest.TestCase):
         usage = session_monitor.get_rolling_window_usage(self.config_data)
         self.assertEqual(usage["5h"]["requests"], 0)
         self.assertIsNone(usage["5h"]["cost"])
-        self.assertIsNone(usage["5h"]["last_activity_at"])
-        self.assertIsNone(usage["5h"]["clears_at"])
-        self.assertIsNone(usage["5h"]["remaining_seconds"])
-        self.assertIsNone(usage["5h"]["percent_remaining"])
+        self.assertIsNone(usage["5h"]["window_start_at"])
+        self.assertIsNone(usage["5h"]["elapsed_seconds"])
+        self.assertIsNone(usage["5h"]["percent_used"])
 
-    def test_get_rolling_window_usage_clears_at_tracks_most_recent_activity(self):
+    def test_get_rolling_window_usage_anchors_to_oldest_surviving_activity(self):
         now = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
         older_ts = (now - timedelta(hours=3)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
         newest_ts = (now - timedelta(minutes=10)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
@@ -293,15 +292,14 @@ class TestSessionMonitor(unittest.TestCase):
         usage = session_monitor.get_rolling_window_usage(self.config_data, now=now)
         w = usage["5h"]
 
-        # clears_at must anchor to the NEWEST activity in the window, not the oldest
-        # or some gap-based guess - the window keeps counting until its most recent
-        # entry ages out.
-        expected_newest = now - timedelta(minutes=10)
-        self.assertEqual(w["last_activity_at"], expected_newest)
-        self.assertEqual(w["clears_at"], expected_newest + timedelta(hours=5))
-        self.assertAlmostEqual(w["remaining_seconds"], (timedelta(hours=5) - timedelta(minutes=10)).total_seconds())
-        # 4h50m left out of a 5h window = 96.67%
-        self.assertAlmostEqual(w["percent_remaining"], 96.66666666666667)
+        # window_start_at must anchor to the OLDEST activity still inside the window,
+        # not the newest - elapsed/used grows with how long that request has been
+        # sitting in the window, instead of resetting on every new request.
+        expected_oldest = now - timedelta(hours=3)
+        self.assertEqual(w["window_start_at"], expected_oldest)
+        self.assertAlmostEqual(w["elapsed_seconds"], timedelta(hours=3).total_seconds())
+        # 3h elapsed out of a 5h window = 60%
+        self.assertAlmostEqual(w["percent_used"], 60.0)
 
     def test_get_rolling_window_usage_empty_window_after_long_gap(self):
         now = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
@@ -316,9 +314,9 @@ class TestSessionMonitor(unittest.TestCase):
 
         # Nothing in the last 5h -> genuinely empty, not a fabricated "just started" guess.
         self.assertEqual(w["requests"], 0)
-        self.assertIsNone(w["last_activity_at"])
-        self.assertIsNone(w["clears_at"])
-        self.assertIsNone(w["remaining_seconds"])
+        self.assertIsNone(w["window_start_at"])
+        self.assertIsNone(w["elapsed_seconds"])
+        self.assertIsNone(w["percent_used"])
 
 
 class TestClaudeConfig(unittest.TestCase):

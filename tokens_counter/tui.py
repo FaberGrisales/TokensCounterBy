@@ -150,11 +150,12 @@ def _context_bar(percent, length=10):
 def _neutral_bar(percent, length=10):
     """
     Compact bar with no red/green health semantics, e.g. '████░░░░░░ 40.00%'.
-    Used for values where "high" isn't good or bad by itself (e.g. time
-    remaining until a rolling window clears - low is actually good news).
-    Two decimal places so it visibly ticks on every refresh even without new
-    activity (whole-number % only moves once every few minutes on the 5h
-    window, which reads as "frozen" at a 5s refresh interval).
+    Used for values that aren't a real quota (e.g. how much of a rolling
+    usage window's timespan is currently occupied by continuous activity -
+    see session_monitor.get_rolling_window_usage). Two decimal places so it
+    visibly ticks on every refresh even without new activity (whole-number %
+    only moves once every few minutes on the 5h window, which reads as
+    "frozen" at a 5s refresh interval).
     """
     if percent is None:
         return "[dim]N/A[/]"
@@ -166,10 +167,9 @@ def _neutral_bar(percent, length=10):
 def _format_duration(seconds):
     """
     Formats a duration in seconds as e.g. '1d 4h', '3h 12m 05s', or '45s'.
-    Always includes seconds below the 1-day mark so the countdown visibly
-    ticks down on every refresh, even without new Claude Code activity -
-    whole-minute-only formatting can look frozen for up to a minute at a time
-    at a few-second refresh interval.
+    Always includes seconds below the 1-day mark so it visibly ticks on
+    every refresh - whole-minute-only formatting can look frozen for up to a
+    minute at a time at a few-second refresh interval.
     """
     if seconds is None:
         return "N/A"
@@ -272,15 +272,14 @@ def render_session_monitor_view(sessions):
 def _subscription_disclaimer():
     """The static caveat text for Subscription Status / rolling-window estimates. Doesn't change between refreshes."""
     return Panel(
-        "[dim]\"Recent Consumption\" sums real usage from your local transcripts over rolling time windows. \"When Your\n"
-        "Current Window Clears\" shows when your MOST RECENT request in that window will age out of it, if you don't\n"
-        "use Claude Code again before then - use it again and this time moves forward. \"Time Left %\" is that same\n"
-        "countdown expressed as a % of the window's total duration - it is NOT Claude Code's quota-used percentage;\n"
-        "a low Time Left % just means your last activity is close to aging out (which is good news, not bad). Neither\n"
-        "table reproduces Claude Code's actual quota-used percentage or reset countdown for its 5h/weekly seat\n"
-        "allowance: that's computed server-side against a per-tier budget that isn't publicly documented and isn't\n"
-        "cached anywhere on this machine; only the real `/usage` command inside Claude Code can show that\n"
-        "authoritative % and reset time. This app never reads your access/refresh tokens either way.[/]",
+        "[dim]\"Recent Consumption\" sums real usage from your local transcripts over rolling time windows. \"Session\n"
+        "Window Usage\" finds the OLDEST request that still falls inside that window and shows how long it's been\n"
+        "sitting there as a % of the window's total duration - it grows the more continuously you keep using Claude\n"
+        "Code, and eases back down once that old activity ages out with nothing newer to replace it. This is NOT\n"
+        "Claude Code's quota-used percentage - it's a time-based proxy built from your own activity timestamps, since\n"
+        "the real quota-used % for the 5h/weekly seat allowance is computed server-side against a per-tier budget\n"
+        "that isn't publicly documented and isn't cached anywhere on this machine; only the real `/usage` command\n"
+        "inside Claude Code can show that authoritative %. This app never reads your access/refresh tokens either way.[/]",
         border_style="dim", width=95
     )
 
@@ -349,26 +348,26 @@ def _build_subscription_status_renderables(status, rolling_usage=None, include_d
             )
         renderables.append(window_table)
 
-        clears_table = Table(box=box.ROUNDED, border_style="blue", title="[bold blue]⏳ WHEN YOUR CURRENT WINDOW CLEARS (local estimate) ⏳[/]")
-        clears_table.add_column("Window", style="bold green")
-        clears_table.add_column("Status", justify="center")
-        clears_table.add_column("Time Left %", justify="center")
-        clears_table.add_column("Clears By (est.)", justify="right")
-        clears_table.add_column("Time Left (est.)", justify="right")
+        usage_window_table = Table(box=box.ROUNDED, border_style="blue", title="[bold blue]📶 SESSION WINDOW USAGE (local estimate) 📶[/]")
+        usage_window_table.add_column("Window", style="bold green")
+        usage_window_table.add_column("Status", justify="center")
+        usage_window_table.add_column("Window Used %", justify="center")
+        usage_window_table.add_column("Window Started", justify="right")
+        usage_window_table.add_column("Time Elapsed", justify="right")
 
         for key, label in (("5h", "5h window"), ("7d", "7d window")):
             w = rolling_usage.get(key, {})
-            if w.get("last_activity_at") is None:
-                clears_table.add_row(label, "[dim]Empty (no recent activity)[/]", "[dim]N/A[/]", "-", "-")
+            if w.get("window_start_at") is None:
+                usage_window_table.add_row(label, "[dim]Empty (no recent activity)[/]", "[dim]N/A[/]", "-", "-")
             else:
-                clears_table.add_row(
+                usage_window_table.add_row(
                     label,
                     "[green]Active[/]",
-                    _neutral_bar(w.get("percent_remaining")),
-                    _format_local_time(w.get("clears_at")),
-                    _format_duration(w.get("remaining_seconds"))
+                    _neutral_bar(w.get("percent_used")),
+                    _format_local_time(w.get("window_start_at")),
+                    _format_duration(w.get("elapsed_seconds"))
                 )
-        renderables.append(clears_table)
+        renderables.append(usage_window_table)
 
     if include_disclaimer:
         renderables.append(_subscription_disclaimer())
@@ -477,8 +476,8 @@ def render_global_usage_live_view(status, rolling_usage, data):
     """
     Builds (does not print) the combined Subscription Status + Global Usage
     renderables as a single Group, for use with rich.live.Live so the whole
-    screen (including Time Left %/Clears By) refreshes in place instead of
-    requiring the user to exit and re-run the menu option.
+    screen (including Window Used %/Time Elapsed) refreshes in place instead
+    of requiring the user to exit and re-run the menu option.
 
     Skips both disclaimer panels (include_disclaimer=False): they're static
     text that never changes between refreshes, so print_global_usage_disclaimers()
