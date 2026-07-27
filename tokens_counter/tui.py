@@ -149,30 +149,41 @@ def _context_bar(percent, length=10):
 
 def _neutral_bar(percent, length=10):
     """
-    Compact bar with no red/green health semantics, e.g. '████░░░░░░ 40%'.
+    Compact bar with no red/green health semantics, e.g. '████░░░░░░ 40.00%'.
     Used for values where "high" isn't good or bad by itself (e.g. time
     remaining until a rolling window clears - low is actually good news).
+    Two decimal places so it visibly ticks on every refresh even without new
+    activity (whole-number % only moves once every few minutes on the 5h
+    window, which reads as "frozen" at a 5s refresh interval).
     """
     if percent is None:
         return "[dim]N/A[/]"
     ratio = min(1.0, max(0.0, percent / 100))
     filled = int(round(ratio * length))
     bar = "█" * filled + "░" * (length - filled)
-    return f"[cyan]{bar} {percent:.0f}%[/]"
+    return f"[cyan]{bar} {percent:.2f}%[/]"
 
 def _format_duration(seconds):
-    """Formats a duration in seconds as e.g. '1d 4h' or '3h 12m'."""
+    """
+    Formats a duration in seconds as e.g. '1d 4h', '3h 12m 05s', or '45s'.
+    Always includes seconds below the 1-day mark so the countdown visibly
+    ticks down on every refresh, even without new Claude Code activity -
+    whole-minute-only formatting can look frozen for up to a minute at a time
+    at a few-second refresh interval.
+    """
     if seconds is None:
         return "N/A"
     seconds = int(max(0, seconds))
     days, rem = divmod(seconds, 86400)
     hours, rem = divmod(rem, 3600)
-    minutes, _ = divmod(rem, 60)
+    minutes, secs = divmod(rem, 60)
     if days:
         return f"{days}d {hours}h"
     if hours:
-        return f"{hours}h {minutes}m"
-    return f"{minutes}m"
+        return f"{hours}h {minutes}m {secs:02d}s"
+    if minutes:
+        return f"{minutes}m {secs:02d}s"
+    return f"{secs}s"
 
 def _format_local_time(dt):
     """Formats a UTC datetime as a local-time string, e.g. '2026-07-24 19:57 (local)'."""

@@ -85,6 +85,7 @@ Contenido:
 - **Recent Consumption**: cuántos tokens/costo real gastaste en las **últimas 5 horas** y en los **últimos 7 días** (ventana móvil real, sumada de tus transcripts locales) — el dato subyacente en el que se basan las ventanas de tu plan.
 - **When Your Current Window Clears**: para cada ventana (5h y 7 días), una barra de **% de tiempo restante**, a qué hora (local) y en cuánto tiempo tu petición **más reciente** dejará de contar dentro de esa ventana, si no vuelves a usar Claude Code antes de eso. Si vuelves a usarlo, este momento se mueve hacia adelante automáticamente. Si la ventana está vacía (no has usado Claude Code en ese período), lo dice explícitamente en vez de inventar un número.
   - **Importante sobre el "%"**: es un **% de tiempo** (cuánto del countdown hasta que se libere la ventana queda), **no** el % de tu cuota de plan gastada. Un % bajo aquí es buena noticia (tu actividad está a punto de dejar de contar), no una alerta.
+  - El % se muestra con 2 decimales y el tiempo restante incluye segundos (ej. `4h 59m 44s`) para que veas el avance en cada refresco de 5 segundos, en vez de que parezca congelado por minutos.
 - **Total Estimated Cost** y **Total Requests**: sumados sobre todas las sesiones detectadas.
 - **Usage by Model**: la misma idea que la lista de `/usage` (`modelo: input, output, cache read, cache write ($costo)`), pero agregada globalmente.
 - **By Project**: desglose adicional por carpeta de proyecto (esto no existe en `/usage`, pero como esta app ve todas las sesiones a la vez, tiene sentido mostrarlo).
