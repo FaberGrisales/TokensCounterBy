@@ -3,7 +3,6 @@ import os
 from rich.console import Console, Group
 from rich.panel import Panel
 from rich.table import Table
-from rich.text import Text
 from rich import box
 
 console = Console()
@@ -270,47 +269,12 @@ def render_session_monitor_view(sessions):
 
     return Group(header, table, footer)
 
-def _subscription_disclaimer():
-    """
-    The static caveat text for Subscription Status / rolling-window estimates.
-    Built as a left-justified Text (not a plain string) so it isn't affected
-    by the ambient justify="center" used when printing this panel - passing a
-    plain multi-line string lets that ambient justify re-center each line
-    independently within the panel's interior width, which mangles any line
-    shorter than the panel width (a real bug seen in practice, not
-    hypothetical - short trailing fragments floated to the middle of the box).
-    """
-    return Panel(
-        Text(
-            "\"Session Window Usage\" is a real-elapsed-time estimate from your local transcripts, not Claude "
-            "Code's actual quota-used %/reset (that's computed server-side against an undocumented per-tier "
-            "budget and isn't cached on this machine - only the real `/usage` command shows it). This app never "
-            "reads your access/refresh tokens.",
-            style="dim", justify="left"
-        ),
-        border_style="dim", width=95
-    )
-
-def _usage_summary_disclaimer():
-    """The static caveat text for the Global Usage cost breakdown. Doesn't change between refreshes."""
-    return Panel(
-        Text(
-            "Cost is estimated locally from token counts via models_config.json and may differ from your actual "
-            "bill. Unpriced models show N/A rather than $0.",
-            style="dim", justify="left"
-        ),
-        border_style="dim", width=95
-    )
-
 MAX_TABLE_ROWS = 8
 
-def _build_subscription_status_renderables(status, rolling_usage=None, include_disclaimer=True):
+def _build_subscription_status_renderables(status, rolling_usage=None):
     """
     Builds the Subscription Status panels/tables as a list, without printing.
-    Shared by the static (one-shot) and live-refreshing views; the latter
-    passes include_disclaimer=False since that text never changes between
-    refreshes and only adds height to a view that's already tight on
-    terminal space (see render_global_usage_live_view()).
+    Shared by the static (one-shot) and live-refreshing views.
     """
     if not status:
         return [Panel(
@@ -380,8 +344,6 @@ def _build_subscription_status_renderables(status, rolling_usage=None, include_d
                 )
         renderables.append(usage_window_table)
 
-    if include_disclaimer:
-        renderables.append(_subscription_disclaimer())
     return renderables
 
 def render_subscription_status(status, rolling_usage=None):
@@ -396,13 +358,11 @@ def render_subscription_status(status, rolling_usage=None):
         console.print(renderable, justify="center")
         console.print()
 
-def _build_usage_summary_renderables(data, include_disclaimer=True):
+def _build_usage_summary_renderables(data):
     """
     Builds the Global Usage panels/tables as a list, without printing. Shared
-    by the static (one-shot) and live-refreshing views; the latter passes
-    include_disclaimer=False for the same reason as
-    _build_subscription_status_renderables(). "Usage by Model" and "By
-    Project" are capped to MAX_TABLE_ROWS (sorted by cost, already
+    by the static (one-shot) and live-refreshing views. "Usage by Model" and
+    "By Project" are capped to MAX_TABLE_ROWS (sorted by cost, already
     descending) with a "+N more" note, so an account with many models/
     projects doesn't grow the view past a typical terminal's height.
     """
@@ -468,8 +428,6 @@ def _build_usage_summary_renderables(data, include_disclaimer=True):
         project_table.add_row(f"[dim]+{len(project_rows) - MAX_TABLE_ROWS} more[/]", "", "", "")
     renderables.append(project_table)
 
-    if include_disclaimer:
-        renderables.append(_usage_summary_disclaimer())
     return renderables
 
 def render_usage_summary(data):
@@ -490,26 +448,17 @@ def render_global_usage_live_view(status, rolling_usage, data):
     screen (including Window Used %/Time Elapsed) refreshes in place instead
     of requiring the user to exit and re-run the menu option.
 
-    Skips both disclaimer panels (include_disclaimer=False): they're static
-    text that never changes between refreshes, so print_global_usage_disclaimers()
-    shows them once before the Live loop starts instead, keeping this Group's
-    height down - a Live renderable taller than the terminal either gets
-    silently cropped (the default "ellipsis" overflow mode) or, worse, causes
-    Live to reprint the whole thing on every refresh instead of redrawing in
-    place (vertical_overflow="visible"), which is what "By Project" scrolling
-    forever every few seconds turned out to be.
+    Keeping this Group's height down matters: a Live renderable taller than
+    the terminal either gets silently cropped (the default "ellipsis"
+    overflow mode) or, worse, causes Live to reprint the whole thing on every
+    refresh instead of redrawing in place (vertical_overflow="visible"),
+    which is what "By Project" scrolling forever every few seconds turned
+    out to be - see MAX_TABLE_ROWS for the other half of that fix.
     """
-    renderables = _build_subscription_status_renderables(status, rolling_usage, include_disclaimer=False)
-    renderables += _build_usage_summary_renderables(data, include_disclaimer=False)
+    renderables = _build_subscription_status_renderables(status, rolling_usage)
+    renderables += _build_usage_summary_renderables(data)
     renderables.append("[dim]Refreshing every few seconds · Press Ctrl+C to stop and return to the menu[/]")
     return Group(*renderables)
-
-def print_global_usage_disclaimers():
-    """Prints the two static caveat panels once - meant to run before the Live loop in watch_global_usage(), not inside it."""
-    console.print(_subscription_disclaimer(), justify="center")
-    console.print()
-    console.print(_usage_summary_disclaimer(), justify="center")
-    console.print()
 
 def render_claude_config(mcp_servers, hooks):
     """

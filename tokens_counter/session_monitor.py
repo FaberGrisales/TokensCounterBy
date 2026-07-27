@@ -423,22 +423,19 @@ def watch_global_usage(config_data, refresh_seconds=5):
     visibly tick forward instead of requiring the user to exit and re-enter
     the menu option to see updated numbers.
 
-    The two static disclaimer panels are printed once, before the Live loop
-    starts, instead of being part of the repeatedly-redrawn Group: they never
-    change between refreshes, and a Live renderable taller than the terminal
-    either gets silently cropped (the default "ellipsis" overflow) or, if
-    forced to vertical_overflow="visible", makes Live reprint the whole thing
-    on every refresh instead of redrawing in place - which is what made "By
-    Project" appear to scroll/duplicate endlessly in an earlier version of
-    this function. Keeping the live Group to just the numbers that actually
-    change (plus capping long tables - see tui.MAX_TABLE_ROWS) is the real
-    fix; Live's default overflow handling is left alone.
+    Keeping the live Group to just the numbers that actually change (plus
+    capping long tables - see tui.MAX_TABLE_ROWS) matters: a Live renderable
+    taller than the terminal either gets silently cropped (the default
+    "ellipsis" overflow) or, if forced to vertical_overflow="visible", makes
+    Live reprint the whole thing on every refresh instead of redrawing in
+    place - which is what made "By Project" appear to scroll/duplicate
+    endlessly in an earlier version of this function.
     """
     from rich.live import Live
     # Imported lazily (not at module load) to avoid a circular import, since
     # claude_config.py itself imports get_claude_config_dir from this module.
     from tokens_counter.claude_config import get_subscription_status
-    from tokens_counter.tui import console, render_global_usage_live_view, print_global_usage_disclaimers
+    from tokens_counter.tui import console, render_global_usage_live_view
 
     def snapshot():
         status = get_subscription_status()
@@ -446,7 +443,6 @@ def watch_global_usage(config_data, refresh_seconds=5):
         usage_data = get_global_usage_summary(config_data)
         return render_global_usage_live_view(status, rolling_usage, usage_data)
 
-    print_global_usage_disclaimers()
     with Live(snapshot(), console=console, refresh_per_second=1) as live:
         while True:
             time.sleep(refresh_seconds)
