@@ -409,3 +409,29 @@ def watch_sessions(config_data, refresh_seconds=3):
         while True:
             time.sleep(refresh_seconds)
             live.update(render_session_monitor_view(get_all_sessions(config_data)))
+
+
+def watch_global_usage(config_data, refresh_seconds=5):
+    """
+    Render a live-updating view of subscription status + global usage
+    (Recent Consumption, When Your Current Window Clears, Usage by Model, By
+    Project) until interrupted (Ctrl+C), so the Time Left %/Clears By/minute
+    counters visibly tick forward instead of requiring the user to exit and
+    re-enter the menu option to see updated numbers.
+    """
+    from rich.live import Live
+    # Imported lazily (not at module load) to avoid a circular import, since
+    # claude_config.py itself imports get_claude_config_dir from this module.
+    from tokens_counter.claude_config import get_subscription_status
+    from tokens_counter.tui import console, render_global_usage_live_view
+
+    def snapshot():
+        status = get_subscription_status()
+        rolling_usage = get_rolling_window_usage(config_data)
+        usage_data = get_global_usage_summary(config_data)
+        return render_global_usage_live_view(status, rolling_usage, usage_data)
+
+    with Live(snapshot(), console=console, refresh_per_second=1) as live:
+        while True:
+            time.sleep(refresh_seconds)
+            live.update(snapshot())

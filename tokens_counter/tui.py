@@ -258,24 +258,16 @@ def render_session_monitor_view(sessions):
 
     return Group(header, table, footer)
 
-def render_subscription_status(status, rolling_usage=None):
-    """
-    Renders Claude subscription/account status read from locally-cached OAuth
-    account metadata — never the access/refresh tokens themselves — plus real
-    local consumption over rolling 5h/7d windows. See
-    claude_config.get_subscription_status() and
-    session_monitor.get_rolling_window_usage() for exactly what's read/computed.
-    """
+def _build_subscription_status_renderables(status, rolling_usage=None):
+    """Builds the Subscription Status panels/tables as a list, without printing. Shared by the static and live-refreshing views."""
     if not status:
-        console.print(Panel(
+        return [Panel(
             "[yellow]No local Claude subscription session found.[/]\n"
             "[dim]This shows up once you've logged in to Claude Code with a claude.ai account\n"
             "(Pro/Max/Team/Enterprise). If this machine only uses an API key, there's nothing to read.[/]",
             title="[bold cyan]👤 CLAUDE SUBSCRIPTION STATUS 👤[/]",
             border_style="yellow", box=box.ROUNDED, width=90
-        ), justify="center")
-        console.print()
-        return
+        )]
 
     plan_label = status.get("organization_type") or status.get("subscription_type") or "unknown"
     extra_usage = "[green]Enabled[/]" if status.get("has_extra_usage_enabled") else "[dim]Disabled[/]"
@@ -289,12 +281,11 @@ def render_subscription_status(status, rolling_usage=None):
     if status.get("trial_ends_at"):
         lines.append(f"[bold yellow]Trial ends:[/] {status['trial_ends_at']}")
 
-    console.print(Panel(
+    renderables = [Panel(
         "\n".join(lines),
         title="[bold cyan]👤 CLAUDE SUBSCRIPTION STATUS 👤[/]",
         border_style="cyan", box=box.DOUBLE, width=90
-    ), justify="center")
-    console.print()
+    )]
 
     if rolling_usage:
         window_table = Table(box=box.ROUNDED, border_style="magenta", title="[bold magenta]⏱️ RECENT CONSUMPTION (local estimate) ⏱️[/]")
@@ -314,9 +305,7 @@ def render_subscription_status(status, rolling_usage=None):
                 f"{w.get('cache_read', 0):,} / {w.get('cache_write', 0):,}",
                 cost_str
             )
-
-        console.print(window_table, justify="center")
-        console.print()
+        renderables.append(window_table)
 
         clears_table = Table(box=box.ROUNDED, border_style="blue", title="[bold blue]⏳ WHEN YOUR CURRENT WINDOW CLEARS (local estimate) ⏳[/]")
         clears_table.add_column("Window", style="bold green")
@@ -337,11 +326,9 @@ def render_subscription_status(status, rolling_usage=None):
                     _format_local_time(w.get("clears_at")),
                     _format_duration(w.get("remaining_seconds"))
                 )
+        renderables.append(clears_table)
 
-        console.print(clears_table, justify="center")
-        console.print()
-
-    console.print(Panel(
+    renderables.append(Panel(
         "[dim]\"Recent Consumption\" sums real usage from your local transcripts over rolling time windows. \"When Your\n"
         "Current Window Clears\" shows when your MOST RECENT request in that window will age out of it, if you don't\n"
         "use Claude Code again before then - use it again and this time moves forward. \"Time Left %\" is that same\n"
@@ -352,19 +339,25 @@ def render_subscription_status(status, rolling_usage=None):
         "cached anywhere on this machine; only the real `/usage` command inside Claude Code can show that\n"
         "authoritative % and reset time. This app never reads your access/refresh tokens either way.[/]",
         border_style="dim", width=95
-    ), justify="center")
-    console.print()
+    ))
+    return renderables
 
-def render_usage_summary(data):
+def render_subscription_status(status, rolling_usage=None):
     """
-    Renders a snapshot modeled on Claude Code's own `/usage` command: total
-    cost and a "Usage by model" breakdown, plus a per-project breakdown this
-    app can offer since it sees every local session, not just the current
-    one. See session_monitor.get_global_usage_summary() for how it's built.
+    Renders Claude subscription/account status read from locally-cached OAuth
+    account metadata — never the access/refresh tokens themselves — plus real
+    local consumption over rolling 5h/7d windows. See
+    claude_config.get_subscription_status() and
+    session_monitor.get_rolling_window_usage() for exactly what's read/computed.
     """
+    for renderable in _build_subscription_status_renderables(status, rolling_usage):
+        console.print(renderable, justify="center")
+        console.print()
+
+def _build_usage_summary_renderables(data):
+    """Builds the Global Usage panels/tables as a list, without printing. Shared by the static and live-refreshing views."""
     if not data["session_count"]:
-        console.print("[yellow]No Claude Code sessions found on this machine.[/]")
-        return
+        return ["[yellow]No Claude Code sessions found on this machine.[/]"]
 
     cost_str = f"${data['total_cost']:.4f}" if data["total_cost"] is not None else "[dim]N/A (no priced model found)[/]"
     header = Panel(
@@ -375,8 +368,7 @@ def render_usage_summary(data):
         box=box.DOUBLE,
         width=70
     )
-    console.print(header, justify="center")
-    console.print()
+    renderables = [header]
 
     # "Usage by model" — mirrors the list format /usage prints for the current session,
     # but aggregated across every local session this app can find.
@@ -400,9 +392,7 @@ def render_usage_summary(data):
         )
     if not data["usage_by_model"]:
         model_table.add_row("-", "-", "-", "-", "-", "-")
-
-    console.print(model_table, justify="center")
-    console.print()
+    renderables.append(model_table)
 
     # By project — /usage doesn't have this (it's scoped to one session), but
     # this app sees every project's sessions, so it's a natural extension.
@@ -420,16 +410,37 @@ def render_usage_summary(data):
             f"{p['input']:,} / {p['output']:,}",
             cost_cell
         )
+    renderables.append(project_table)
 
-    console.print(project_table, justify="center")
-    console.print()
-
-    console.print(Panel(
+    renderables.append(Panel(
         "[dim]Cost is estimated locally from token counts via models_config.json — it may differ from your actual bill.\n"
         "Unpriced models show N/A rather than $0. See Subscription Status above for plan/rate-limit-tier info.[/]",
         border_style="dim", width=95
-    ), justify="center")
-    console.print()
+    ))
+    return renderables
+
+def render_usage_summary(data):
+    """
+    Renders a snapshot modeled on Claude Code's own `/usage` command: total
+    cost and a "Usage by model" breakdown, plus a per-project breakdown this
+    app can offer since it sees every local session, not just the current
+    one. See session_monitor.get_global_usage_summary() for how it's built.
+    """
+    for renderable in _build_usage_summary_renderables(data):
+        console.print(renderable, justify="center")
+        console.print()
+
+def render_global_usage_live_view(status, rolling_usage, data):
+    """
+    Builds (does not print) the combined Subscription Status + Global Usage
+    renderables as a single Group, for use with rich.live.Live so the whole
+    screen (including Time Left %/Clears By) refreshes in place instead of
+    requiring the user to exit and re-run the menu option.
+    """
+    renderables = _build_subscription_status_renderables(status, rolling_usage)
+    renderables += _build_usage_summary_renderables(data)
+    renderables.append("[dim]Refreshing every few seconds · Press Ctrl+C to stop and return to the menu[/]")
+    return Group(*renderables)
 
 def render_claude_config(mcp_servers, hooks):
     """

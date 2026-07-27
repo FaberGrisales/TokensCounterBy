@@ -75,7 +75,11 @@ Presiona **Ctrl+C** para detener el monitor y volver al menú.
 
 ## 📊 Global Claude Usage (Opción 3)
 
-Claude Code tiene su propio comando `/usage`, que muestra el costo y el desglose de tokens **de la sesión actual** ("Usage by model": tokens de entrada/salida/caché y costo por modelo — ver la [documentación oficial](https://code.claude.com/docs/en/costs#using-the-usage-command)). Esta opción hace lo mismo pero para **todas** las sesiones locales que encuentre en tu máquina, no solo la que tienes abierta, y además le agrega el estado de tu suscripción:
+Claude Code tiene su propio comando `/usage`, que muestra el costo y el desglose de tokens **de la sesión actual** ("Usage by model": tokens de entrada/salida/caché y costo por modelo — ver la [documentación oficial](https://code.claude.com/docs/en/costs#using-the-usage-command)). Esta opción hace lo mismo pero para **todas** las sesiones locales que encuentre en tu máquina, no solo la que tienes abierta, y además le agrega el estado de tu suscripción.
+
+**Se refresca sola** cada pocos segundos (igual que el Live Session Monitor) — no necesitas salir y volver a entrar para ver los minutos/porcentajes actualizados. Presiona **Ctrl+C** para detenerla y volver al menú.
+
+Contenido:
 
 - **Claude Subscription Status**: cuenta, organización, tipo de plan (Free/Pro/Max/Team/Enterprise), seat tier, tier de rate-limit, y si tienes "extra usage" habilitado. Se lee de `~/.claude.json` (bloque `oauthAccount`) y `~/.claude/.credentials.json` (bloque `claudeAiOauth`) — **nunca** se lee ni se muestra tu access/refresh token, solo los metadatos de cuenta que los acompañan. Si esta máquina solo usa una API key (sin login de claude.ai), no hay nada que mostrar aquí y la app lo indica.
 - **Recent Consumption**: cuántos tokens/costo real gastaste en las **últimas 5 horas** y en los **últimos 7 días** (ventana móvil real, sumada de tus transcripts locales) — el dato subyacente en el que se basan las ventanas de tu plan.

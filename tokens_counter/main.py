@@ -159,21 +159,22 @@ def main():
             input("\nPress Enter to return...")
 
         elif choice == "3":
-            # Global usage snapshot, modeled on Claude Code's own /usage
-            # command (see https://code.claude.com/docs/en/costs): plan/
-            # subscription status plus total cost and a "Usage by model"
-            # breakdown, aggregated across every local session instead of
-            # just the current one.
+            # Live-refreshing usage snapshot, modeled on Claude Code's own
+            # /usage command (see https://code.claude.com/docs/en/costs):
+            # plan/subscription status plus total cost and a "Usage by
+            # model" breakdown, aggregated across every local session
+            # instead of just the current one. Refreshes in place so the
+            # Time Left %/Clears By counters visibly tick forward.
             tui.clear_screen()
             tui.console.print("[bold green]=== GLOBAL CLAUDE USAGE (like /usage) ===[/]\n")
-            tui.console.print("[dim]Analyzing local sessions under ~/.claude/projects ...[/]\n")
+            tui.console.print("[dim]Analyzing local sessions under ~/.claude/projects ...[/]")
+            tui.console.print("[yellow]Press Ctrl+C to stop and return to the menu.[/]\n")
 
-            subscription_status = claude_config.get_subscription_status()
-            rolling_usage = session_monitor.get_rolling_window_usage(config_data)
-            tui.render_subscription_status(subscription_status, rolling_usage)
-
-            usage_data = session_monitor.get_global_usage_summary(config_data)
-            tui.render_usage_summary(usage_data)
+            try:
+                session_monitor.watch_global_usage(config_data)
+            except KeyboardInterrupt:
+                pass
+            tui.console.print("\n[bold yellow]Monitor stopped.[/]")
             input("\nPress Enter to return...")
 
         elif choice == "4":
