@@ -50,7 +50,7 @@ def main():
         if choice == "1":
             # Live API Mode
             tui.clear_screen()
-            tui.console.print("[bold green]=== LIVE API PORTAL ===[/]\n")
+            tui.console.print("[bold green]=== CALL LIVE API ===[/]\n")
 
             # Check availability
             gemini_ready = live_manager.is_gemini_ready()
@@ -122,7 +122,7 @@ def main():
             system_instr = Prompt.ask("Enter system instruction (optional, hit Enter to skip)", default="")
             use_caching = Confirm.ask("Enable Prompt Caching?", default=True)
 
-            tui.console.print("\n[bold blink yellow]⏳ TRANSMITTING SIGNAL TO LLM CABINET...[/]")
+            tui.console.print("\n[bold yellow]Sending request...[/]")
 
             # Execute
             if is_gemini:

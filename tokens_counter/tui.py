@@ -1,13 +1,13 @@
-import sys
 import os
 from rich.console import Console, Group
 from rich.panel import Panel
 from rich.table import Table
+from rich.text import Text
 from rich import box
 
 console = Console()
 
-ARCADE_LOGO = """
+BANNER = """
  [cyan]╔═══════════════════════════════════════════════════════════════════╗[/]
  [cyan]║[/][magenta]           ████████╗ ██████╗ ██╗  ██╗███████╗███╗   ██╗            [/][cyan]║[/]
  [cyan]║[/][magenta]           ╚══██╔══╝██╔═══██╗██║ ██╔╝██╔════╝████╗  ██║            [/][cyan]║[/]
@@ -22,21 +22,16 @@ ARCADE_LOGO = """
  [cyan]║[/][green]   ╚██████╗╚██████╔╝╚██████╔╝██║ ╚████║   ██║   ███████╗██║  ██║   [/][cyan]║[/]
  [cyan]║[/][green]    ╚═════╝ ╚═════╝  ╚═════╝ ╚═╝  ╚═══╝   ╚═╝   ╚══════╝╚═╝  ╚═╝   [/][cyan]║[/]
  [cyan]╚═══════════════════════════════════════════════════════════════════╝[/]
-        [yellow]--==[ TOKEN COUNTER ]==--[/]
+          [yellow]Token Usage & Cost Visualizer[/]
 """
-
-def play_beep():
-    """Triggers an old-school terminal bell beep sound."""
-    sys.stdout.write("\a")
-    sys.stdout.flush()
 
 def clear_screen():
     os.system("cls" if os.name == "nt" else "clear")
 
 def render_header():
-    """Renders the arcade logo banner."""
+    """Renders the app's title banner."""
     clear_screen()
-    console.print(ARCADE_LOGO, justify="center")
+    console.print(BANNER, justify="center")
     console.print()
 
 def render_menu(options):
@@ -62,15 +57,15 @@ def render_live_results(model_key, prompt, response_text, meta, cost):
     """Renders the outcome of a live LLM call."""
     console.print(Panel(
         f"[bold green]Response Text:[/]\n{response_text}",
-        title="[bold yellow]🖥️ CONSOLE OUTPUT 🖥️[/]",
+        title="[bold yellow]Response[/]",
         border_style="yellow",
         box=box.ROUNDED,
         width=75
     ), justify="center")
     console.print()
-    
+
     # Breakdown Table
-    table = Table(box=box.DOUBLE, border_style="cyan", title="[bold cyan]🪙 ACTUAL TRANSACTION RECEIPTS 🪙[/]")
+    table = Table(box=box.DOUBLE, border_style="cyan", title="[bold cyan]Cost Breakdown[/]")
     table.add_column("Metric", style="bold white")
     table.add_column("Quantity", style="yellow", justify="right")
     table.add_column("Rate (per 1M)", style="magenta", justify="right")
@@ -97,7 +92,7 @@ def render_mcp_live_results(model_key, prompt, res, cost):
 
     console.print(Panel(
         f"[bold green]Final Response:[/]\n{res.get('text', '')}",
-        title="[bold yellow]🖥️ CONSOLE OUTPUT 🖥️[/]",
+        title="[bold yellow]Response[/]",
         border_style="yellow",
         box=box.ROUNDED,
         width=75
@@ -105,7 +100,7 @@ def render_mcp_live_results(model_key, prompt, res, cost):
     console.print()
 
     turns = res.get("turns", [])
-    table = Table(box=box.DOUBLE, border_style="magenta", title=f"[bold magenta]🔧 REAL MCP / TOOL-USE BREAKDOWN 🔧[/] (Source: {mcp_source})")
+    table = Table(box=box.DOUBLE, border_style="magenta", title=f"[bold magenta]MCP / Tool-Use Breakdown[/] (Source: {mcp_source})")
     table.add_column("Turn", style="bold white", justify="center")
     table.add_column("Input", style="cyan", justify="right")
     table.add_column("Output", style="magenta", justify="right")
@@ -134,7 +129,7 @@ def render_mcp_live_results(model_key, prompt, res, cost):
         f"[green]Cache Read:[/] {res.get('cached_read_tokens', 0):,}  |  [blue]Cache Write:[/] {res.get('cached_write_tokens', 0):,}\n"
         f"[bold green]Real Cost (USD):[/] ${cost:.6f}"
     )
-    console.print(Panel(summary_text, title="[bold green]🪙 REAL MCP TRANSACTION RECEIPT 🪙[/]", border_style="green", box=box.ROUNDED, width=70), justify="center")
+    console.print(Panel(summary_text, title="[bold green]MCP Call Cost Summary[/]", border_style="green", box=box.ROUNDED, width=70), justify="center")
     console.print()
 
 def _context_bar(percent, length=10):
@@ -215,7 +210,7 @@ def render_session_monitor_view(sessions):
 
     header = Panel(
         "\n".join(header_lines),
-        title="[bold cyan]🔎 CLAUDE CODE — LIVE SESSION MONITOR 🔎[/]",
+        title="[bold cyan]Claude Code — Live Session Monitor[/]",
         border_style="cyan",
         box=box.DOUBLE,
         width=92
@@ -281,7 +276,7 @@ def _build_subscription_status_renderables(status, rolling_usage=None):
             "[yellow]No local Claude subscription session found.[/]\n"
             "[dim]This shows up once you've logged in to Claude Code with a claude.ai account\n"
             "(Pro/Max/Team/Enterprise). If this machine only uses an API key, there's nothing to read.[/]",
-            title="[bold cyan]👤 CLAUDE SUBSCRIPTION STATUS 👤[/]",
+            title="[bold cyan]Claude Subscription Status[/]",
             border_style="yellow", box=box.ROUNDED, width=90
         )]
 
@@ -299,12 +294,12 @@ def _build_subscription_status_renderables(status, rolling_usage=None):
 
     renderables = [Panel(
         "\n".join(lines),
-        title="[bold cyan]👤 CLAUDE SUBSCRIPTION STATUS 👤[/]",
+        title="[bold cyan]Claude Subscription Status[/]",
         border_style="cyan", box=box.DOUBLE, width=90
     )]
 
     if rolling_usage:
-        window_table = Table(box=box.ROUNDED, border_style="magenta", title="[bold magenta]⏱️ RECENT CONSUMPTION (local estimate) ⏱️[/]")
+        window_table = Table(box=box.ROUNDED, border_style="magenta", title="[bold magenta]Recent Consumption (local estimate)[/]")
         window_table.add_column("Window", style="bold green")
         window_table.add_column("Requests", justify="right")
         window_table.add_column("Tokens (In/Out)", justify="right")
@@ -323,7 +318,7 @@ def _build_subscription_status_renderables(status, rolling_usage=None):
             )
         renderables.append(window_table)
 
-        usage_window_table = Table(box=box.ROUNDED, border_style="blue", title="[bold blue]📶 TIME-IN-WINDOW % (local, NOT your plan quota) 📶[/]")
+        usage_window_table = Table(box=box.ROUNDED, border_style="blue", title="[bold blue]Time-in-Window % (local, NOT your plan quota)[/]")
         usage_window_table.add_column("Window", style="bold green")
         usage_window_table.add_column("Status", justify="center")
         usage_window_table.add_column("Time-in-Window %", justify="center")
@@ -377,7 +372,7 @@ def _build_usage_summary_renderables(data):
     header = Panel(
         f"[bold yellow]Sessions found:[/] {data['session_count']}   [bold yellow]Total Requests:[/] {data['total_requests']:,}\n"
         f"[bold green]Total Estimated Cost:[/] {cost_str}",
-        title="[bold cyan]📊 GLOBAL CLAUDE USAGE (like /usage) 📊[/]",
+        title="[bold cyan]Global Claude Usage (like /usage)[/]",
         border_style="cyan",
         box=box.DOUBLE,
         width=70
@@ -470,7 +465,7 @@ def render_claude_config(mcp_servers, hooks):
     own local config files — the same data the real `/mcp` and `/hooks`
     commands show, scoped to this project's directory and this user.
     """
-    mcp_table = Table(box=box.ROUNDED, border_style="magenta", title="[bold magenta]🔌 MCP SERVERS CONFIGURED 🔌[/]")
+    mcp_table = Table(box=box.ROUNDED, border_style="magenta", title="[bold magenta]MCP Servers Configured[/]")
     mcp_table.add_column("Name", style="bold green")
     mcp_table.add_column("Scope", style="cyan")
     mcp_table.add_column("Type", style="yellow")
@@ -488,7 +483,7 @@ def render_claude_config(mcp_servers, hooks):
     console.print(mcp_table, justify="center")
     console.print()
 
-    hooks_table = Table(box=box.ROUNDED, border_style="cyan", title="[bold cyan]🪝 HOOKS CONFIGURED 🪝[/]")
+    hooks_table = Table(box=box.ROUNDED, border_style="cyan", title="[bold cyan]Hooks Configured[/]")
     hooks_table.add_column("Scope", style="bold green")
     hooks_table.add_column("Event", style="yellow")
     hooks_table.add_column("Matcher", style="cyan")
@@ -504,8 +499,11 @@ def render_claude_config(mcp_servers, hooks):
     console.print()
 
     console.print(Panel(
-        "[dim]Reads only this project's .mcp.json / .claude/settings*.json and your user-level ~/.claude.json /\n"
-        "~/.claude/settings.json. Organization-managed policy files aren't read by this app.[/]",
+        Text(
+            "Reads only this project's .mcp.json / .claude/settings*.json and your user-level "
+            "~/.claude.json / ~/.claude/settings.json. Organization-managed policy files aren't read by this app.",
+            style="dim", justify="left"
+        ),
         border_style="dim", width=95
     ), justify="center")
     console.print()
