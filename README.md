@@ -13,10 +13,10 @@ Asegúrate de tener Python 3.8+ instalado en tu sistema. Se recomienda crear un 
 ```bash
 python3 -m venv venv
 source venv/bin/activate        # En Windows: venv\Scripts\activate
-pip install rich anthropic google-genai huggingface_hub openai
+pip install rich anthropic google-genai huggingface_hub openai python-dotenv
 ```
 
-`rich` es obligatorio para la interfaz. `anthropic`, `google-genai`, `huggingface_hub` y `openai` son opcionales: sin alguno de ellos la app funciona igual, pero la **Opción 1 (Call Live API)** se deshabilita para el proveedor cuyo SDK falte.
+`rich` es obligatorio para la interfaz. `anthropic`, `google-genai`, `huggingface_hub`, `openai` y `python-dotenv` son opcionales: sin alguno de ellos la app funciona igual, pero la **Opción 1 (Call Live API)** se deshabilita para el proveedor cuyo SDK falte (y sin `python-dotenv` no se carga un archivo `.env` automáticamente — ver más abajo).
 
 ---
 
@@ -148,6 +148,25 @@ $env:OPENAI_API_KEY="tu-clave-aqui"
 ```
 
 Puedes configurar solo las claves que vayas a usar: la app detecta cuáles proveedores están disponibles (según SDK instalado + clave presente) y muestra su estado (`READY`/`DISABLED`) al entrar a la Opción 1; deshabilita en el menú cualquiera que falte.
+
+### Usando un archivo `.env` (alternativa a exportar cada vez)
+
+En vez de exportar las claves a mano en cada sesión de terminal, puedes ponerlas en un archivo `.env` en la raíz del proyecto:
+
+1. Instala la dependencia opcional: `pip install python-dotenv`.
+2. Copia la plantilla: `cp .env.example .env`.
+3. Edita `.env` y llena solo las claves que vayas a usar:
+   ```
+   ANTHROPIC_API_KEY=tu-clave-aqui
+   GEMINI_API_KEY=tu-clave-aqui
+   HF_TOKEN=tu-token-aqui
+   OPENAI_API_KEY=tu-clave-aqui
+   ```
+4. Ejecuta `python3 start.py` normalmente — la app carga `.env` automáticamente al arrancar.
+
+`.env` ya está en `.gitignore`, así que nunca se sube al repo. Si `python-dotenv` no está instalado, la app funciona igual, simplemente no lee `.env` (tendrás que exportar las claves como en la sección anterior). Una variable ya exportada en tu shell siempre tiene prioridad sobre lo que haya en `.env` — este último solo rellena lo que falte.
+
+**Nota sobre tokens de Hugging Face:** los tokens reales empiezan con `hf_` (minúscula). Si el tuyo tiene un prefijo distinto, revísalo — un typo ahí hace que la autenticación falle silenciosamente como si la clave no sirviera.
 
 ---
 

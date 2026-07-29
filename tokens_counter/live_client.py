@@ -3,6 +3,19 @@ import json
 
 from tokens_counter import mcp_tools
 
+# Load a local .env file (if python-dotenv is installed and a .env exists)
+# into the real process environment, so API keys can live there instead of
+# being exported by hand every session. This never writes anything back to
+# disk, and never overrides a variable already set in the real environment -
+# it only fills in what's missing. Soft-imported like the provider SDKs
+# below, so the app runs the same without python-dotenv installed; you'd
+# just need to export the keys yourself instead.
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 # Safe imports to prevent crashing if packages aren't installed
 ANTHROPIC_AVAILABLE = False
 try:
