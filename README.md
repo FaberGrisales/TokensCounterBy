@@ -13,10 +13,10 @@ Asegúrate de tener Python 3.8+ instalado en tu sistema. Se recomienda crear un 
 ```bash
 python3 -m venv venv
 source venv/bin/activate        # En Windows: venv\Scripts\activate
-pip install rich anthropic google-genai huggingface_hub openai python-dotenv
+pip install -r requirements.txt
 ```
 
-`rich` es obligatorio para la interfaz. `anthropic`, `google-genai`, `huggingface_hub`, `openai` y `python-dotenv` son opcionales: sin alguno de ellos la app funciona igual, pero la **Opción 1 (Call Live API)** se deshabilita para el proveedor cuyo SDK falte (y sin `python-dotenv` no se carga un archivo `.env` automáticamente — ver más abajo).
+`rich` es obligatorio para la interfaz. `anthropic`, `google-genai`, `huggingface_hub`, `openai` y `python-dotenv` (todos en `requirements.txt`) son opcionales: sin alguno de ellos la app funciona igual, pero la **Opción 1 (Call Live API)** se deshabilita para el proveedor cuyo SDK falte (y sin `python-dotenv` no se carga un archivo `.env` automáticamente — ver más abajo).
 
 ---
 

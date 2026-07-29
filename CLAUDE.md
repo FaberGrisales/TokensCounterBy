@@ -11,9 +11,9 @@ A terminal (TUI) app for tracking the real cost of LLM usage (Claude, Gemini, Hu
 Run from the project root:
 
 ```bash
-python3 -m venv .venv && source .venv/bin/activate                      # create/activate a virtualenv (not committed to git)
-pip install rich anthropic google-genai huggingface_hub openai python-dotenv  # install dependencies (all but rich are optional)
-python3 start.py                                                         # launch the interactive TUI app
+python3 -m venv .venv && source .venv/bin/activate   # create/activate a virtualenv (not committed to git)
+pip install -r requirements.txt                      # install dependencies (all but rich are optional; see requirements.txt)
+python3 start.py                                      # launch the interactive TUI app
 python3 -m unittest tests.test_calculator             # run the full test suite
 python3 -m unittest tests.test_calculator.TestSessionMonitor.test_get_all_sessions_includes_subagent_usage  # run a single test
 ```
