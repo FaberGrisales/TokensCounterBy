@@ -56,13 +56,15 @@ def main():
             gemini_ready = live_manager.is_gemini_ready()
             anthropic_ready = live_manager.is_anthropic_ready()
             hf_ready = live_manager.is_hf_ready()
+            openai_ready = live_manager.is_openai_ready()
 
             tui.console.print(f"Gemini API Status : {'[green]READY (Key Found)[/]' if gemini_ready else '[red]DISABLED (Missing Key)[/]'}")
             tui.console.print(f"Claude API Status : {'[green]READY (Key Found)[/]' if anthropic_ready else '[red]DISABLED (Missing Key)[/]'}")
-            tui.console.print(f"Hugging Face API Status : {'[green]READY (Key Found)[/]' if hf_ready else '[red]DISABLED (Missing Key)[/]'}\n")
+            tui.console.print(f"Hugging Face API Status : {'[green]READY (Key Found)[/]' if hf_ready else '[red]DISABLED (Missing Key)[/]'}")
+            tui.console.print(f"OpenAI API Status : {'[green]READY (Key Found)[/]' if openai_ready else '[red]DISABLED (Missing Key)[/]'}\n")
 
-            if not gemini_ready and not anthropic_ready and not hf_ready:
-                tui.console.print("[yellow]WARNING: No API keys found in env variables (GEMINI_API_KEY / ANTHROPIC_API_KEY / HF_TOKEN).[/]")
+            if not gemini_ready and not anthropic_ready and not hf_ready and not openai_ready:
+                tui.console.print("[yellow]WARNING: No API keys found in env variables (GEMINI_API_KEY / ANTHROPIC_API_KEY / HF_TOKEN / OPENAI_API_KEY).[/]")
                 tui.console.print("Please set your keys or press any key to return to the main menu.")
                 input("\nPress Enter to return...")
                 continue
@@ -74,13 +76,18 @@ def main():
             # Check key specifically for this provider
             is_gemini = "gemini" in model_key or "Google" in provider
             is_huggingface = "Hugging Face" in provider
-            is_claude = not is_gemini and not is_huggingface
+            is_openai = "OpenAI" in provider
+            is_claude = not is_gemini and not is_huggingface and not is_openai
             if is_gemini and not gemini_ready:
                 tui.console.print("[red]Error: GEMINI_API_KEY is missing. Can't launch Gemini Live mode.[/]")
                 input("\nPress Enter to return...")
                 continue
             if is_huggingface and not hf_ready:
                 tui.console.print("[red]Error: HF_TOKEN is missing. Can't launch Hugging Face Live mode.[/]")
+                input("\nPress Enter to return...")
+                continue
+            if is_openai and not openai_ready:
+                tui.console.print("[red]Error: OPENAI_API_KEY is missing. Can't launch OpenAI Live mode.[/]")
                 input("\nPress Enter to return...")
                 continue
             if is_claude and not anthropic_ready:
@@ -122,6 +129,8 @@ def main():
                 res = live_manager.call_gemini(model_key, prompt, system_instruction=system_instr or None, use_caching=use_caching)
             elif is_huggingface:
                 res = live_manager.call_huggingface(model_key, prompt, system_instruction=system_instr or None, use_caching=use_caching)
+            elif is_openai:
+                res = live_manager.call_openai(model_key, prompt, system_instruction=system_instr or None, use_caching=use_caching)
             elif use_real_mcp:
                 res = live_manager.call_claude_with_tools(
                     model_key, prompt, system_instruction=system_instr or None, use_caching=use_caching,

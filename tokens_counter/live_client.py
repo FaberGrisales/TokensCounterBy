@@ -26,12 +26,20 @@ try:
 except ImportError:
     pass
 
+OPENAI_AVAILABLE = False
+try:
+    import openai
+    OPENAI_AVAILABLE = True
+except ImportError:
+    pass
+
 
 class LiveClientManager:
     def __init__(self):
         self.gemini_key = os.environ.get("GEMINI_API_KEY", "")
         self.anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
         self.hf_key = os.environ.get("HF_TOKEN", "")
+        self.openai_key = os.environ.get("OPENAI_API_KEY", "")
 
     def is_gemini_ready(self):
         return GEMINI_AVAILABLE and bool(self.gemini_key)
@@ -41,6 +49,9 @@ class LiveClientManager:
 
     def is_hf_ready(self):
         return HF_AVAILABLE and bool(self.hf_key)
+
+    def is_openai_ready(self):
+        return OPENAI_AVAILABLE and bool(self.openai_key)
 
     def call_gemini(self, model_name, prompt, system_instruction=None, use_caching=False):
         """
@@ -139,6 +150,63 @@ class LiveClientManager:
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
                 "cached_read_tokens": 0,
+                "cached_write_tokens": 0,
+                "error": None
+            }
+        except Exception as e:
+            return {
+                "text": "",
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "cached_read_tokens": 0,
+                "cached_write_tokens": 0,
+                "error": str(e)
+            }
+
+    def call_openai(self, model_name, prompt, system_instruction=None, use_caching=False):
+        """
+        Calls a real model through OpenAI's Chat Completions API using the
+        official `openai` SDK. model_name must be the exact OpenAI model id
+        (e.g. "gpt-4o-mini"), same convention as the other providers.
+
+        use_caching is accepted only for a uniform call signature; OpenAI's
+        prompt caching is automatic for eligible prompts and only reported
+        after the fact, not something callers request explicitly, so this
+        flag has no effect here. Cache reads come from the real
+        usage.prompt_tokens_details.cached_tokens field when the response
+        includes one; OpenAI doesn't bill cache writes separately, so
+        cached_write_tokens is always 0.
+        """
+        if not OPENAI_AVAILABLE:
+            raise ImportError("The 'openai' package is not installed. Run 'pip install openai' to use Live Mode.")
+        if not self.openai_key:
+            raise ValueError("OPENAI_API_KEY environment variable is not set.")
+
+        client = openai.OpenAI(api_key=self.openai_key)
+
+        messages = []
+        if system_instruction:
+            messages.append({"role": "system", "content": system_instruction})
+        messages.append({"role": "user", "content": prompt})
+
+        try:
+            response = client.chat.completions.create(model=model_name, messages=messages)
+
+            text = response.choices[0].message.content or ""
+
+            usage = getattr(response, "usage", None)
+            input_tokens = getattr(usage, "prompt_tokens", 0) or 0
+            output_tokens = getattr(usage, "completion_tokens", 0) or 0
+            cached_tokens = 0
+            prompt_details = getattr(usage, "prompt_tokens_details", None)
+            if prompt_details is not None:
+                cached_tokens = getattr(prompt_details, "cached_tokens", 0) or 0
+
+            return {
+                "text": text,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "cached_read_tokens": cached_tokens,
                 "cached_write_tokens": 0,
                 "error": None
             }
