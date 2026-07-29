@@ -165,16 +165,11 @@ def build_session_summary(group, config_data, now=None):
     for model, tokens in by_model.items():
         if model not in config_data:
             continue
-        cost = calculate_call_cost(
+        has_priced_model = True
+        priced_cost += calculate_call_cost(
             model, tokens["input"], tokens["output"],
             cached_read_tokens=tokens["cache_read"], cached_write_tokens=tokens["cache_write"]
         )
-        if cost is None:
-            # Explicitly "unpriced": true (e.g. some Hugging Face defaults) -
-            # doesn't count toward the session's priced total.
-            continue
-        has_priced_model = True
-        priced_cost += cost
 
     last_request_cost = None
     if last_request and last_request["model"] in config_data:
@@ -286,7 +281,6 @@ def get_global_usage_summary(config_data):
                 model, tokens["input"], tokens["output"],
                 cached_read_tokens=tokens["cache_read"], cached_write_tokens=tokens["cache_write"]
             )
-        if cost is not None:
             total_cost += cost
             any_priced = True
         usage_by_model.append({"model": model, **tokens, "cost": cost})

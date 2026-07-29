@@ -1,8 +1,8 @@
 # 📊 Token Usage & Cost Visualizer
 
-Un visualizador de uso y costo real de tokens para modelos de lenguaje (LLMs) — Claude, Gemini, Hugging Face y OpenAI — con una interfaz de terminal (TUI).
+Un visualizador de terminal (TUI) del uso y costo real de **Claude Code** en tu máquina: qué sesiones están activas, cuánto han gastado, qué tan llena está su ventana de contexto, el estado de tu suscripción, y qué servidores MCP/hooks tienes configurados.
 
-Este proyecto está diseñado para ayudarte a visualizar exactamente cuánto dinero gastas en cada llamada a una API — **Claude, Gemini, Hugging Face u OpenAI** — (incluyendo llamadas reales con herramientas / MCP en Claude), ver en tiempo real qué sesiones de Claude Code están consumiendo tokens en tu máquina (incluyendo qué tan llena está su ventana de contexto), revisar el estado de tu suscripción de Claude y una foto fija de tu consumo global inspirada en el comando `/usage`, y ver qué servidores MCP y hooks tienes configurados (como `/mcp` y `/hooks`). Todos los números que ves vienen de una respuesta real de la API o de tus transcripts/config locales de Claude Code — no hay ningún modo simulado/estimado.
+Esta app **no hace llamadas a ninguna API** y **no necesita ninguna clave**. Es de solo lectura: todo lo que muestra viene de leer los transcripts y archivos de configuración que **Claude Code ya guarda localmente** en tu máquina (`~/.claude/projects`, `~/.claude.json`, `.mcp.json`, `.claude/settings.json`). No hay modo simulado/estimado, ni mecánicas de juego, ni nada que se conecte a internet por su cuenta.
 
 ---
 
@@ -16,7 +16,7 @@ source venv/bin/activate        # En Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-`rich` es obligatorio para la interfaz. `anthropic`, `google-genai`, `huggingface_hub`, `openai` y `python-dotenv` (todos en `requirements.txt`) son opcionales: sin alguno de ellos la app funciona igual, pero la **Opción 1 (Call Live API)** se deshabilita para el proveedor cuyo SDK falte (y sin `python-dotenv` no se carga un archivo `.env` automáticamente — ver más abajo).
+La única dependencia es `rich` (la interfaz de terminal). No se necesita ninguna API key.
 
 ---
 
@@ -31,58 +31,18 @@ python3 start.py
 
 Una vez iniciado, verás el menú principal con las siguientes opciones:
 
-1. **Call Live API (Requires keys)**: Realiza consultas reales a Claude, Gemini, Hugging Face u OpenAI. Debes tener tus API keys configuradas (ver sección de abajo).
-2. **Live Session Monitor**: Ve en tiempo real qué sesiones de Claude Code están activas en esta máquina, cuánto está gastando cada una, y qué tan llena está su ventana de contexto (ver sección de abajo).
-3. **Global Claude Usage (like /usage)**: Estado de tu suscripción de Claude y una foto fija de tu consumo en esta máquina, inspirada en el comando real `/usage` de Claude Code (ver sección de abajo).
-4. **Claude Code Config (MCP & Hooks)**: Qué servidores MCP y qué hooks tienes configurados para este proyecto, inspirado en los comandos `/mcp` y `/hooks` (ver sección de abajo).
-5. **Exit**: Cierra la aplicación.
+1. **Live Session Monitor**: Ve en tiempo real qué sesiones de Claude Code están activas en esta máquina, cuánto está gastando cada una, y qué tan llena está su ventana de contexto (ver sección de abajo).
+2. **Global Claude Usage (like /usage)**: Estado de tu suscripción de Claude y una foto fija de tu consumo en esta máquina, inspirada en el comando real `/usage` de Claude Code (ver sección de abajo).
+3. **Claude Code Config (MCP & Hooks)**: Qué servidores MCP y qué hooks tienes configurados para este proyecto, inspirado en los comandos `/mcp` y `/hooks` (ver sección de abajo).
+4. **Exit**: Cierra la aplicación.
 
-Los precios por modelo viven en `tokens_counter/models_config.json` (editable a mano); no hay historial de llamadas ni ningún saldo almacenado dentro de la app — el costo de cada llamada real se muestra al momento, en la propia pantalla de resultado.
-
-### 🔧 Tool-Use / MCP real en la Opción 1 (solo Claude)
-
-Cuando eliges un modelo de Claude en la **Opción 1**, la app te pregunta si quieres **activar Tool-Use / MCP real** para esa llamada. Si aceptas, Claude puede invocar herramientas de verdad durante la conversación (no simuladas), y verás el desglose real de tokens y costo turno por turno al terminar:
-
-- **Herramientas locales de demo** (opción por defecto, deja el campo de URL vacío): `get_current_time` (hora UTC), `calculate` (evalúa una expresión aritmética de forma segura) y `list_project_files` (lista los archivos `.py` del proyecto).
-- **Servidor MCP remoto real**: si tienes tu propio servidor MCP, ingresa su URL (y un token de autorización opcional) cuando se te solicite. Claude usará el conector MCP de Anthropic para llamarlo directamente; la app registra los tokens reales que eso consume.
-
-El costo real de la llamada (incluyendo el desglose por turno) se muestra al terminar, en la misma pantalla.
-
-### 🤗 Hugging Face en la Opción 1
-
-También puedes llamar modelos reales a través de la API de **Hugging Face Inference Providers** (misma Opción 1 del menú). La app trae 4 modelos populares precargados para que aparezcan en el menú sin configurar nada:
-
-- `meta-llama/Llama-3.1-8B-Instruct`
-- `meta-llama/Llama-3.1-70B-Instruct`
-- `Qwen/Qwen2.5-7B-Instruct`
-- `mistralai/Mistral-7B-Instruct-v0.3`
-
-**Importante:** estos 4 vienen **sin precio** (`"unpriced": true` en `models_config.json`). El catálogo de Hugging Face es enorme y el mismo modelo puede tener tarifas distintas según qué proveedor de inferencia lo sirva por debajo (Together, Fireworks, Novita, ...) — no hay un número único y confiable que hardcodear. Mientras un modelo esté marcado así, la app muestra el costo como **N/A** en vez de inventar un `$0.00`. Para que muestre el costo real:
-
-1. Abre `tokens_counter/models_config.json`, busca tu modelo, confirma la tarifa real del proveedor que estés usando, y agrega `"input_cost_per_1m"` / `"output_cost_per_1m"` (quita `"unpriced": true` o déjalo en `false`).
-2. Para un modelo que no esté en la lista, agrega tu propia entrada con la clave siendo el **repo id exacto de Hugging Face** y `"provider": "Hugging Face"`.
-3. Configura tu token: `export HF_TOKEN="tu-token-aqui"` (debe empezar con `hf_`, no `Hf_`/`HF_` con mayúsculas).
-4. En la Opción 1, selecciona el modelo — la app llama a la API de chat-completions de Hugging Face (compatible con el formato de OpenAI) vía `huggingface_hub.InferenceClient`.
-
-**Limitación honesta:** el conteo de tokens que ves depende de que el proveedor de inferencia detrás de Hugging Face reporte `usage` en su respuesta — no todos lo hacen. Si un modelo no reporta uso real, verás `0` tokens en vez de un número inventado; en ese caso, no le agregues precio hasta confirmar que sí lo reporta. Tampoco hay concepto de prompt caching en esta API, así que cache read/write siempre son 0 para Hugging Face.
-
-### OpenAI en la Opción 1
-
-También puedes llamar modelos reales de **OpenAI** (misma Opción 1 del menú), vía el SDK oficial `openai` y su API de Chat Completions. La app trae precargados algunos de los modelos más comunes, con las tarifas publicadas por OpenAI (mismo tratamiento que Claude/Gemini): `gpt-4o`, `gpt-4o-mini`, `gpt-4.1`, `gpt-4.1-mini`, `o1-mini`.
-
-**Nota:** los precios de OpenAI cambian con el tiempo y estos números están mantenidos a mano — si ves un costo que no cuadra con lo que factura OpenAI, revisa/actualiza la tarifa en `tokens_counter/models_config.json` (ver [su página de precios oficial](https://openai.com/api/pricing/)). Para usar un modelo de OpenAI que no esté en la lista:
-
-1. Agrega tu propia entrada a `tokens_counter/models_config.json`, usando como clave el **id exacto del modelo de OpenAI** (ej. `"gpt-5"`), con `"provider": "OpenAI"` y tus tarifas reales por 1M de tokens.
-2. Configura tu clave: `export OPENAI_API_KEY="tu-clave-aqui"`.
-3. En la Opción 1, selecciona ese modelo — la app llamará la API de Chat Completions de OpenAI y mostrará el costo real usando la tarifa que configuraste.
-
-**Limitación honesta:** el prompt caching de OpenAI es automático (no algo que esta app solicite) y solo se reporta después del hecho vía `usage.prompt_tokens_details.cached_tokens`; eso es lo único que se usa como "cache read" real. OpenAI no cobra aparte por "cache write", así que ese valor siempre es 0 para OpenAI.
+Los precios por modelo de Claude viven en `tokens_counter/models_config.json` (editable a mano) — de ahí sale el costo que ves en las Opciones 1 y 2.
 
 ---
 
-## 🔎 Live Session Monitor (Opción 2)
+## 🔎 Live Session Monitor (Opción 1)
 
-Muestra en tiempo real todas las sesiones de **Claude Code** activas o recientes en esta máquina (cualquier ventana/pestaña donde estés usando tu suscripción o API key de Claude, en cualquier proyecto), y cuánto ha consumido cada una — para que puedas controlar el gasto mientras trabajas.
+Muestra en tiempo real todas las sesiones de **Claude Code** activas o recientes en esta máquina (cualquier ventana/pestaña donde estés usando Claude Code, en cualquier proyecto), y cuánto ha consumido cada una — para que puedas controlar el gasto mientras trabajas.
 
 Cómo funciona: Claude Code guarda automáticamente un transcript local por sesión en `~/.claude/projects/<proyecto>/<session-id>.jsonl` (y uno adicional por cada subagente/workflow que lances dentro de esa sesión). Esta opción lee esos archivos localmente — nunca sale nada de tu computador — y extrae **solo** metadatos de uso (modelo, tokens de entrada/salida/caché, timestamp); nunca lee ni muestra el contenido de tus prompts o respuestas.
 
@@ -103,7 +63,7 @@ Presiona **Ctrl+C** para detener el monitor y volver al menú.
 
 ---
 
-## 📊 Global Claude Usage (Opción 3)
+## 📊 Global Claude Usage (Opción 2)
 
 Claude Code tiene su propio comando `/usage`, que muestra el costo y el desglose de tokens **de la sesión actual** ("Usage by model": tokens de entrada/salida/caché y costo por modelo — ver la [documentación oficial](https://code.claude.com/docs/en/costs#using-the-usage-command)). Esta opción hace lo mismo pero para **todas** las sesiones locales que encuentre en tu máquina, no solo la que tienes abierta, y además le agrega el estado de tu suscripción.
 
@@ -126,7 +86,7 @@ Contenido:
 
 ---
 
-## 🔧 Claude Code Config: MCP & Hooks (Opción 4)
+## 🔧 Claude Code Config: MCP & Hooks (Opción 3)
 
 Inspirada en los comandos `/mcp` y `/hooks` de Claude Code. Muestra:
 
@@ -134,49 +94,6 @@ Inspirada en los comandos `/mcp` y `/hooks` de Claude Code. Muestra:
 - **Hooks configurados**: leídos de `.claude/settings.json` y `.claude/settings.local.json` del proyecto, y de tu `~/.claude/settings.json` de usuario — evento, matcher, y cuántos comandos tiene cada hook.
 
 **Limitación honesta:** esta opción no lee políticas de configuración administradas a nivel de organización (managed settings / managed MCP), solo el alcance de proyecto + usuario. Como el resto de la app, es de solo lectura: nunca modifica tu configuración.
-
----
-
-## 🔑 Configuración de APIs Reales
-
-Para usar la **Opción 1** (llamadas reales, con o sin Tool-Use/MCP), configura tus claves de API como variables de entorno:
-
-**En Linux / macOS:**
-```bash
-export ANTHROPIC_API_KEY="tu-clave-aqui"
-export GEMINI_API_KEY="tu-clave-aqui"
-export HF_TOKEN="tu-token-aqui"
-export OPENAI_API_KEY="tu-clave-aqui"
-```
-
-**En Windows (PowerShell):**
-```powershell
-$env:ANTHROPIC_API_KEY="tu-clave-aqui"
-$env:GEMINI_API_KEY="tu-clave-aqui"
-$env:HF_TOKEN="tu-token-aqui"
-$env:OPENAI_API_KEY="tu-clave-aqui"
-```
-
-Puedes configurar solo las claves que vayas a usar: la app detecta cuáles proveedores están disponibles (según SDK instalado + clave presente) y muestra su estado (`READY`/`DISABLED`) al entrar a la Opción 1; deshabilita en el menú cualquiera que falte.
-
-### Usando un archivo `.env` (alternativa a exportar cada vez)
-
-En vez de exportar las claves a mano en cada sesión de terminal, puedes ponerlas en un archivo `.env` en la raíz del proyecto:
-
-1. Instala la dependencia opcional: `pip install python-dotenv`.
-2. Copia la plantilla: `cp .env.example .env`.
-3. Edita `.env` y llena solo las claves que vayas a usar:
-   ```
-   ANTHROPIC_API_KEY=tu-clave-aqui
-   GEMINI_API_KEY=tu-clave-aqui
-   HF_TOKEN=tu-token-aqui
-   OPENAI_API_KEY=tu-clave-aqui
-   ```
-4. Ejecuta `python3 start.py` normalmente — la app carga `.env` automáticamente al arrancar.
-
-`.env` ya está en `.gitignore`, así que nunca se sube al repo. Si `python-dotenv` no está instalado, la app funciona igual, simplemente no lee `.env` (tendrás que exportar las claves como en la sección anterior). Una variable ya exportada en tu shell siempre tiene prioridad sobre lo que haya en `.env` — este último solo rellena lo que falte.
-
-**Nota sobre tokens de Hugging Face:** los tokens reales empiezan con `hf_` (minúscula). Si el tuyo tiene un prefijo distinto, revísalo — un typo ahí hace que la autenticación falle silenciosamente como si la clave no sirviera.
 
 ---
 

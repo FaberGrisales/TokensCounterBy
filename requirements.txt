@@ -1,13 +1,4 @@
-# Required - the TUI itself won't run without this.
+# Only dependency: the TUI rendering library. This app makes no external
+# API calls and needs no API keys - it only reads Claude Code's own local
+# files (session transcripts, config), so nothing else is required.
 rich
-
-# Optional - enable each real API provider in Option 1 (Call Live API).
-# Missing one just disables that provider in the menu; the app still runs.
-anthropic
-google-genai
-huggingface_hub
-openai
-
-# Optional - lets the app load API keys from a .env file automatically.
-# Without it, export the keys as real environment variables instead.
-python-dotenv
