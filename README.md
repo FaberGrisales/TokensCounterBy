@@ -2,7 +2,7 @@
 
 Un monitor financiero de tokens para modelos de lenguaje (LLMs) como Claude y Gemini, diseñado con una interfaz de terminal (TUI) que imita una máquina de arcade clásica de 8 bits.
 
-Este proyecto está diseñado para ayudarte a visualizar exactamente cuánto dinero gastas en cada llamada a una API (incluyendo llamadas reales con herramientas / MCP en Claude), ver en tiempo real qué sesiones de Claude Code están consumiendo tokens en tu máquina (incluyendo qué tan llena está su ventana de contexto), revisar el estado de tu suscripción de Claude y una foto fija de tu consumo global inspirada en el comando `/usage`, y ver qué servidores MCP y hooks tienes configurados (como `/mcp` y `/hooks`). Todos los números que ves vienen de una respuesta real de la API o de tus transcripts/config locales de Claude Code — no hay ningún modo simulado/estimado ni mecánicas de juego (billetera, monedas, high scores).
+Este proyecto está diseñado para ayudarte a visualizar exactamente cuánto dinero gastas en cada llamada a una API — **Claude, Gemini o Hugging Face** — (incluyendo llamadas reales con herramientas / MCP en Claude), ver en tiempo real qué sesiones de Claude Code están consumiendo tokens en tu máquina (incluyendo qué tan llena está su ventana de contexto), revisar el estado de tu suscripción de Claude y una foto fija de tu consumo global inspirada en el comando `/usage`, y ver qué servidores MCP y hooks tienes configurados (como `/mcp` y `/hooks`). Todos los números que ves vienen de una respuesta real de la API o de tus transcripts/config locales de Claude Code — no hay ningún modo simulado/estimado ni mecánicas de juego (billetera, monedas, high scores).
 
 ---
 
@@ -13,10 +13,10 @@ Asegúrate de tener Python 3.8+ instalado en tu sistema. Se recomienda crear un 
 ```bash
 python3 -m venv venv
 source venv/bin/activate        # En Windows: venv\Scripts\activate
-pip install rich anthropic google-genai
+pip install rich anthropic google-genai huggingface_hub
 ```
 
-`rich` es obligatorio para la interfaz. `anthropic` y `google-genai` son opcionales: sin ellos la app funciona igual, pero la **Opción 1 (Call Live API)** se deshabilita para el proveedor cuyo SDK falte.
+`rich` es obligatorio para la interfaz. `anthropic`, `google-genai` y `huggingface_hub` son opcionales: sin alguno de ellos la app funciona igual, pero la **Opción 1 (Call Live API)** se deshabilita para el proveedor cuyo SDK falte.
 
 ---
 
@@ -47,6 +47,16 @@ Cuando eliges un modelo de Claude en la **Opción 1**, la app te pregunta si qui
 - **Servidor MCP remoto real**: si tienes tu propio servidor MCP, ingresa su URL (y un token de autorización opcional) cuando se te solicite. Claude usará el conector MCP de Anthropic para llamarlo directamente; la app registra los tokens reales que eso consume.
 
 El costo real de la llamada (incluyendo el desglose por turno) se muestra al terminar, en la misma pantalla.
+
+### 🤗 Hugging Face en la Opción 1
+
+También puedes llamar modelos reales a través de la API de **Hugging Face Inference Providers** (misma Opción 1 del menú). A diferencia de Claude/Gemini, el catálogo de Hugging Face es enorme y las tarifas varían muchísimo según el modelo y el proveedor de inferencia que lo sirva por debajo — por eso esta app **no trae ningún modelo de Hugging Face precargado** en `models_config.json`. Para usarlo:
+
+1. Agrega tu propio modelo a `tokens_counter/models_config.json`, usando como clave el **repo id exacto de Hugging Face** (ej. `"meta-llama/Llama-3.1-8B-Instruct"`), con `"provider": "Hugging Face"` y tus tarifas reales por 1M de tokens (verifica el precio actual del modelo/proveedor que vayas a usar antes de escribirlo — la app nunca inventa un precio).
+2. Configura tu token: `export HF_TOKEN="tu-token-aqui"`.
+3. En la Opción 1, selecciona ese modelo — la app llamará la API de chat-completions de Hugging Face (compatible con el formato de OpenAI) vía `huggingface_hub.InferenceClient` y mostrará el costo real usando la tarifa que configuraste.
+
+**Limitación honesta:** el conteo de tokens que ves depende de que el proveedor de inferencia detrás de Hugging Face reporte `usage` en su respuesta — no todos lo hacen. Si un modelo no reporta uso real, verás `0` en vez de un número inventado; en ese caso, no le agregues precio en `models_config.json` hasta confirmar que sí lo reporta. Tampoco hay concepto de prompt caching en esta API, así que cache read/write siempre son 0 para Hugging Face.
 
 ---
 
@@ -115,15 +125,17 @@ Para usar la **Opción 1** (llamadas reales, con o sin Tool-Use/MCP), configura 
 ```bash
 export ANTHROPIC_API_KEY="tu-clave-aqui"
 export GEMINI_API_KEY="tu-clave-aqui"
+export HF_TOKEN="tu-token-aqui"
 ```
 
 **En Windows (PowerShell):**
 ```powershell
 $env:ANTHROPIC_API_KEY="tu-clave-aqui"
 $env:GEMINI_API_KEY="tu-clave-aqui"
+$env:HF_TOKEN="tu-token-aqui"
 ```
 
-Puedes configurar solo una de las dos claves: la app detecta cuál proveedor está disponible y deshabilita el otro en el menú.
+Puedes configurar solo las claves que vayas a usar: la app detecta cuáles proveedores están disponibles (según SDK instalado + clave presente) y muestra su estado (`READY`/`DISABLED`) al entrar a la Opción 1; deshabilita en el menú cualquiera que falte.
 
 ---
 

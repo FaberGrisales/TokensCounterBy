@@ -19,17 +19,28 @@ try:
 except ImportError:
     pass
 
+HF_AVAILABLE = False
+try:
+    from huggingface_hub import InferenceClient
+    HF_AVAILABLE = True
+except ImportError:
+    pass
+
 
 class LiveClientManager:
     def __init__(self):
         self.gemini_key = os.environ.get("GEMINI_API_KEY", "")
         self.anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        self.hf_key = os.environ.get("HF_TOKEN", "")
 
     def is_gemini_ready(self):
         return GEMINI_AVAILABLE and bool(self.gemini_key)
 
     def is_anthropic_ready(self):
         return ANTHROPIC_AVAILABLE and bool(self.anthropic_key)
+
+    def is_hf_ready(self):
+        return HF_AVAILABLE and bool(self.hf_key)
 
     def call_gemini(self, model_name, prompt, system_instruction=None, use_caching=False):
         """
@@ -73,6 +84,62 @@ class LiveClientManager:
                 "output_tokens": output_tokens,
                 "cached_read_tokens": cached_tokens,
                 "cached_write_tokens": 0, # Gemini handles write dynamically without extra fees (only charging standard input or read cached)
+                "error": None
+            }
+        except Exception as e:
+            return {
+                "text": "",
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "cached_read_tokens": 0,
+                "cached_write_tokens": 0,
+                "error": str(e)
+            }
+
+    def call_huggingface(self, model_name, prompt, system_instruction=None, use_caching=False):
+        """
+        Calls a real model through Hugging Face's Inference Providers
+        chat-completions API (OpenAI-compatible request/response shape) via
+        huggingface_hub.InferenceClient. model_name must be the exact HF repo
+        id (e.g. "meta-llama/Llama-3.1-8B-Instruct"), since that's what gets
+        passed straight through to the API - same convention as model_key
+        already being a literal API model string for Gemini/Claude.
+
+        use_caching is accepted only for a uniform call signature across
+        providers; HF's chat-completions API has no prompt-caching concept,
+        so cached_read_tokens/cached_write_tokens are always 0. Token usage
+        is only real when the provider HF routes to actually reports it in
+        the response - some do, some don't; when absent this returns 0
+        rather than guessing, and the model should stay unpriced in
+        models_config.json until you've confirmed a call reports usage.
+        """
+        if not HF_AVAILABLE:
+            raise ImportError("The 'huggingface_hub' package is not installed. Run 'pip install huggingface_hub' to use Live Mode.")
+        if not self.hf_key:
+            raise ValueError("HF_TOKEN environment variable is not set.")
+
+        client = InferenceClient(api_key=self.hf_key)
+
+        messages = []
+        if system_instruction:
+            messages.append({"role": "system", "content": system_instruction})
+        messages.append({"role": "user", "content": prompt})
+
+        try:
+            response = client.chat.completions.create(model=model_name, messages=messages)
+
+            text = response.choices[0].message.content or ""
+
+            usage = getattr(response, "usage", None)
+            input_tokens = getattr(usage, "prompt_tokens", 0) or 0
+            output_tokens = getattr(usage, "completion_tokens", 0) or 0
+
+            return {
+                "text": text,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "cached_read_tokens": 0,
+                "cached_write_tokens": 0,
                 "error": None
             }
         except Exception as e:
