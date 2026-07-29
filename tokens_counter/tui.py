@@ -54,7 +54,11 @@ def render_menu(options):
     ), justify="center")
 
 def render_live_results(model_key, prompt, response_text, meta, cost):
-    """Renders the outcome of a live LLM call."""
+    """
+    Renders the outcome of a live LLM call. cost is None (never a fabricated
+    $0.00) when the model is marked "unpriced" in config - e.g. a default
+    Hugging Face entry added for discoverability without a hardcoded price.
+    """
     console.print(Panel(
         f"[bold green]Response Text:[/]\n{response_text}",
         title="[bold yellow]Response[/]",
@@ -69,20 +73,23 @@ def render_live_results(model_key, prompt, response_text, meta, cost):
     table.add_column("Metric", style="bold white")
     table.add_column("Quantity", style="yellow", justify="right")
     table.add_column("Rate (per 1M)", style="magenta", justify="right")
-    
+
     from tokens_counter.config import load_config
     cfg = load_config()[model_key]
-    
-    table.add_row("Input Tokens", f"{meta['input_tokens']:,}", f"${cfg.get('input_cost_per_1m', 0.0):.2f}")
-    table.add_row("Output Tokens", f"{meta['output_tokens']:,}", f"${cfg.get('output_cost_per_1m', 0.0):.2f}")
-    
+    unpriced = bool(cfg.get("unpriced"))
+    rate_str = lambda key: "[dim]N/A[/]" if unpriced else f"${cfg.get(key, 0.0):.2f}"
+
+    table.add_row("Input Tokens", f"{meta['input_tokens']:,}", rate_str("input_cost_per_1m"))
+    table.add_row("Output Tokens", f"{meta['output_tokens']:,}", rate_str("output_cost_per_1m"))
+
     if meta.get("cached_read_tokens", 0) > 0:
-        table.add_row("Cache Read Tokens", f"[green]{meta['cached_read_tokens']:,}[/]", f"${cfg.get('cache_read_cost_per_1m', 0.0):.2f}")
+        table.add_row("Cache Read Tokens", f"[green]{meta['cached_read_tokens']:,}[/]", rate_str("cache_read_cost_per_1m"))
     if meta.get("cached_write_tokens", 0) > 0:
-        table.add_row("Cache Write Tokens", f"[blue]{meta['cached_write_tokens']:,}[/]", f"${cfg.get('cache_write_cost_per_1m', 0.0):.2f}")
-        
-    table.add_row("Final Cost (USD)", f"[bold green]${cost:.6f}[/]", "-")
-    
+        table.add_row("Cache Write Tokens", f"[blue]{meta['cached_write_tokens']:,}[/]", rate_str("cache_write_cost_per_1m"))
+
+    cost_str = f"[bold green]${cost:.6f}[/]" if cost is not None else "[dim]N/A (no price configured for this model)[/]"
+    table.add_row("Final Cost (USD)", cost_str, "-")
+
     console.print(table, justify="center")
     console.print()
 
@@ -123,11 +130,12 @@ def render_mcp_live_results(model_key, prompt, res, cost):
     console.print(table, justify="center")
     console.print()
 
+    cost_line = f"${cost:.6f}" if cost is not None else "N/A (no price configured for this model)"
     summary_text = (
         f"[bold yellow]Total Turns:[/] {len(turns)}  |  [bold yellow]Total Tool Calls:[/] {res.get('tool_calls', 0)}\n"
         f"[bold cyan]Total Input Tokens:[/] {res['input_tokens']:,}  |  [bold magenta]Total Output Tokens:[/] {res['output_tokens']:,}\n"
         f"[green]Cache Read:[/] {res.get('cached_read_tokens', 0):,}  |  [blue]Cache Write:[/] {res.get('cached_write_tokens', 0):,}\n"
-        f"[bold green]Real Cost (USD):[/] ${cost:.6f}"
+        f"[bold green]Real Cost (USD):[/] {cost_line}"
     )
     console.print(Panel(summary_text, title="[bold green]MCP Call Cost Summary[/]", border_style="green", box=box.ROUNDED, width=70), justify="center")
     console.print()

@@ -50,23 +50,33 @@ El costo real de la llamada (incluyendo el desglose por turno) se muestra al ter
 
 ### 🤗 Hugging Face en la Opción 1
 
-También puedes llamar modelos reales a través de la API de **Hugging Face Inference Providers** (misma Opción 1 del menú). A diferencia de Claude/Gemini, el catálogo de Hugging Face es enorme y las tarifas varían muchísimo según el modelo y el proveedor de inferencia que lo sirva por debajo — por eso esta app **no trae ningún modelo de Hugging Face precargado** en `models_config.json`. Para usarlo:
+También puedes llamar modelos reales a través de la API de **Hugging Face Inference Providers** (misma Opción 1 del menú). La app trae 4 modelos populares precargados para que aparezcan en el menú sin configurar nada:
 
-1. Agrega tu propio modelo a `tokens_counter/models_config.json`, usando como clave el **repo id exacto de Hugging Face** (ej. `"meta-llama/Llama-3.1-8B-Instruct"`), con `"provider": "Hugging Face"` y tus tarifas reales por 1M de tokens (verifica el precio actual del modelo/proveedor que vayas a usar antes de escribirlo — la app nunca inventa un precio).
-2. Configura tu token: `export HF_TOKEN="tu-token-aqui"`.
-3. En la Opción 1, selecciona ese modelo — la app llamará la API de chat-completions de Hugging Face (compatible con el formato de OpenAI) vía `huggingface_hub.InferenceClient` y mostrará el costo real usando la tarifa que configuraste.
+- `meta-llama/Llama-3.1-8B-Instruct`
+- `meta-llama/Llama-3.1-70B-Instruct`
+- `Qwen/Qwen2.5-7B-Instruct`
+- `mistralai/Mistral-7B-Instruct-v0.3`
 
-**Limitación honesta:** el conteo de tokens que ves depende de que el proveedor de inferencia detrás de Hugging Face reporte `usage` en su respuesta — no todos lo hacen. Si un modelo no reporta uso real, verás `0` en vez de un número inventado; en ese caso, no le agregues precio en `models_config.json` hasta confirmar que sí lo reporta. Tampoco hay concepto de prompt caching en esta API, así que cache read/write siempre son 0 para Hugging Face.
+**Importante:** estos 4 vienen **sin precio** (`"unpriced": true` en `models_config.json`). El catálogo de Hugging Face es enorme y el mismo modelo puede tener tarifas distintas según qué proveedor de inferencia lo sirva por debajo (Together, Fireworks, Novita, ...) — no hay un número único y confiable que hardcodear. Mientras un modelo esté marcado así, la app muestra el costo como **N/A** en vez de inventar un `$0.00`. Para que muestre el costo real:
+
+1. Abre `tokens_counter/models_config.json`, busca tu modelo, confirma la tarifa real del proveedor que estés usando, y agrega `"input_cost_per_1m"` / `"output_cost_per_1m"` (quita `"unpriced": true` o déjalo en `false`).
+2. Para un modelo que no esté en la lista, agrega tu propia entrada con la clave siendo el **repo id exacto de Hugging Face** y `"provider": "Hugging Face"`.
+3. Configura tu token: `export HF_TOKEN="tu-token-aqui"` (debe empezar con `hf_`, no `Hf_`/`HF_` con mayúsculas).
+4. En la Opción 1, selecciona el modelo — la app llama a la API de chat-completions de Hugging Face (compatible con el formato de OpenAI) vía `huggingface_hub.InferenceClient`.
+
+**Limitación honesta:** el conteo de tokens que ves depende de que el proveedor de inferencia detrás de Hugging Face reporte `usage` en su respuesta — no todos lo hacen. Si un modelo no reporta uso real, verás `0` tokens en vez de un número inventado; en ese caso, no le agregues precio hasta confirmar que sí lo reporta. Tampoco hay concepto de prompt caching en esta API, así que cache read/write siempre son 0 para Hugging Face.
 
 ### OpenAI en la Opción 1
 
-También puedes llamar modelos reales de **OpenAI** (misma Opción 1 del menú), vía el SDK oficial `openai` y su API de Chat Completions. Igual que con Hugging Face, esta app **no trae ningún modelo de OpenAI precargado** en `models_config.json` — sus precios cambian con el tiempo y prefiero que confirmes la tarifa vigente en vez de arriesgarme a mostrarte un número desactualizado. Para usarlo:
+También puedes llamar modelos reales de **OpenAI** (misma Opción 1 del menú), vía el SDK oficial `openai` y su API de Chat Completions. La app trae precargados algunos de los modelos más comunes, con las tarifas publicadas por OpenAI (mismo tratamiento que Claude/Gemini): `gpt-4o`, `gpt-4o-mini`, `gpt-4.1`, `gpt-4.1-mini`, `o1-mini`.
 
-1. Agrega tu propio modelo a `tokens_counter/models_config.json`, usando como clave el **id exacto del modelo de OpenAI** (ej. `"gpt-4o-mini"`), con `"provider": "OpenAI"` y tus tarifas reales por 1M de tokens.
+**Nota:** los precios de OpenAI cambian con el tiempo y estos números están mantenidos a mano — si ves un costo que no cuadra con lo que factura OpenAI, revisa/actualiza la tarifa en `tokens_counter/models_config.json` (ver [su página de precios oficial](https://openai.com/api/pricing/)). Para usar un modelo de OpenAI que no esté en la lista:
+
+1. Agrega tu propia entrada a `tokens_counter/models_config.json`, usando como clave el **id exacto del modelo de OpenAI** (ej. `"gpt-5"`), con `"provider": "OpenAI"` y tus tarifas reales por 1M de tokens.
 2. Configura tu clave: `export OPENAI_API_KEY="tu-clave-aqui"`.
 3. En la Opción 1, selecciona ese modelo — la app llamará la API de Chat Completions de OpenAI y mostrará el costo real usando la tarifa que configuraste.
 
-**Limitación honesta:** el prompt caching de OpenAI es automático (no algo que esta app solicite) y solo se reporta después del hecho vía `usage.prompt_tokens_details.cached_tokens`; eso es lo único que se usa como "cache read" real. OpenAI no cobra aparte por "cache write", así que ese valor siempre es 0 para OpenAI. Si quieres que el descuento de cache read se refleje en el costo, agrega `"supports_caching": true` y `"cache_read_cost_per_1m"` a tu entrada del modelo.
+**Limitación honesta:** el prompt caching de OpenAI es automático (no algo que esta app solicite) y solo se reporta después del hecho vía `usage.prompt_tokens_details.cached_tokens`; eso es lo único que se usa como "cache read" real. OpenAI no cobra aparte por "cache write", así que ese valor siempre es 0 para OpenAI.
 
 ---
 

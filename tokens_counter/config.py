@@ -109,6 +109,94 @@ DEFAULT_CONFIG = {
         "cache_read_cost_per_1m": 0.10,
         "supports_caching": True,
         "context_window": 300000
+    },
+    # OpenAI: published per-1M-token list prices, same treatment as the
+    # Claude/Gemini entries above (hand-maintained, may drift - verify
+    # against https://openai.com/api/pricing/ if a cost here looks off).
+    # supports_caching only covers OpenAI's automatic cache-read discount;
+    # it doesn't bill cache writes, so cache_write_cost_per_1m is 0.
+    "gpt-4o": {
+        "name": "GPT-4o",
+        "provider": "OpenAI",
+        "input_cost_per_1m": 2.50,
+        "output_cost_per_1m": 10.00,
+        "cache_write_cost_per_1m": 0.0,
+        "cache_read_cost_per_1m": 1.25,
+        "supports_caching": True,
+        "context_window": 128000
+    },
+    "gpt-4o-mini": {
+        "name": "GPT-4o Mini",
+        "provider": "OpenAI",
+        "input_cost_per_1m": 0.15,
+        "output_cost_per_1m": 0.60,
+        "cache_write_cost_per_1m": 0.0,
+        "cache_read_cost_per_1m": 0.075,
+        "supports_caching": True,
+        "context_window": 128000
+    },
+    "gpt-4.1": {
+        "name": "GPT-4.1",
+        "provider": "OpenAI",
+        "input_cost_per_1m": 2.00,
+        "output_cost_per_1m": 8.00,
+        "cache_write_cost_per_1m": 0.0,
+        "cache_read_cost_per_1m": 0.50,
+        "supports_caching": True,
+        "context_window": 1000000
+    },
+    "gpt-4.1-mini": {
+        "name": "GPT-4.1 Mini",
+        "provider": "OpenAI",
+        "input_cost_per_1m": 0.40,
+        "output_cost_per_1m": 1.60,
+        "cache_write_cost_per_1m": 0.0,
+        "cache_read_cost_per_1m": 0.10,
+        "supports_caching": True,
+        "context_window": 1000000
+    },
+    "o1-mini": {
+        "name": "OpenAI o1-mini",
+        "provider": "OpenAI",
+        "input_cost_per_1m": 1.10,
+        "output_cost_per_1m": 4.40,
+        "cache_write_cost_per_1m": 0.0,
+        "cache_read_cost_per_1m": 0.55,
+        "supports_caching": True,
+        "context_window": 128000
+    },
+    # Hugging Face: unpriced on purpose. Its catalog spans thousands of
+    # models and the SAME model can be served by different inference
+    # providers (Together, Fireworks, Novita, ...) at different real prices,
+    # so there's no single trustworthy number to hardcode here. These
+    # entries exist only so common models are selectable/discoverable in
+    # Option 1 out of the box; "unpriced": true makes calculate_call_cost()
+    # return None (shown as N/A) instead of a fabricated $0.00, until you
+    # fill in input_cost_per_1m/output_cost_per_1m yourself after confirming
+    # the real rate for whichever provider route you're using.
+    "meta-llama/Llama-3.1-8B-Instruct": {
+        "name": "Llama 3.1 8B Instruct",
+        "provider": "Hugging Face",
+        "unpriced": True,
+        "context_window": 128000
+    },
+    "meta-llama/Llama-3.1-70B-Instruct": {
+        "name": "Llama 3.1 70B Instruct",
+        "provider": "Hugging Face",
+        "unpriced": True,
+        "context_window": 128000
+    },
+    "Qwen/Qwen2.5-7B-Instruct": {
+        "name": "Qwen2.5 7B Instruct",
+        "provider": "Hugging Face",
+        "unpriced": True,
+        "context_window": 32768
+    },
+    "mistralai/Mistral-7B-Instruct-v0.3": {
+        "name": "Mistral 7B Instruct v0.3",
+        "provider": "Hugging Face",
+        "unpriced": True,
+        "context_window": 32768
     }
 }
 
@@ -146,13 +234,22 @@ def calculate_call_cost(model_key, input_tokens, output_tokens, cached_read_toke
     """
     Calculate the cost of a call in USD based on input, output, and cache usage.
     Rates in config are per 1 Million tokens.
+
+    Returns None (never a fabricated dollar amount) for a model explicitly
+    marked "unpriced": true in config - used for default entries (e.g. some
+    Hugging Face models) added purely so they're selectable/discoverable,
+    whose real-world price varies too much by inference route to hardcode
+    without risking a wrong number. Callers must treat None as "price not
+    configured", not as free.
     """
     config = load_config()
     if model_key not in config:
         return 0.0
-    
+
     m_cfg = config[model_key]
-    
+    if m_cfg.get("unpriced"):
+        return None
+
     # Base costs per token
     in_rate = m_cfg.get("input_cost_per_1m", 0.0) / 1000000.0
     out_rate = m_cfg.get("output_cost_per_1m", 0.0) / 1000000.0

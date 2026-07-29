@@ -51,6 +51,16 @@ class TestTokensCalculator(unittest.TestCase):
         cost = calculate_call_cost("gemini-1.5-flash", 100000, 50000)
         self.assertAlmostEqual(cost, 0.0225)
 
+    def test_cost_calculation_returns_none_for_unpriced_model(self):
+        """
+        Default Hugging Face entries are marked "unpriced": true (added only
+        for discoverability - HF's real per-model/per-route price can't be
+        hardcoded reliably). calculate_call_cost() must return None, never a
+        fabricated $0.00, for those.
+        """
+        cost = calculate_call_cost("meta-llama/Llama-3.1-8B-Instruct", 1000, 500)
+        self.assertIsNone(cost)
+
     def test_safe_arithmetic_eval(self):
         """Test the AST-restricted arithmetic evaluator used by the 'calculate' MCP tool."""
         self.assertEqual(safe_arithmetic_eval("12 * (3 + 4)"), 84)
@@ -223,6 +233,23 @@ class TestSessionMonitor(unittest.TestCase):
         # Total cost stays None only if truly nothing was priced.
         self.assertIsNone(summary["total_cost"])
 
+    def test_get_global_usage_summary_explicitly_unpriced_model_excluded_from_total(self):
+        """
+        Same "cost stays None, not $0" guarantee, but for a model that IS in
+        config (has a context_window etc.) and is only unpriced via the
+        explicit "unpriced": true flag - e.g. a default Hugging Face entry.
+        """
+        self._write_session("proj-o", "session15", [
+            _usage_line("claude-3-5-sonnet", 10000, 2000),
+            _usage_line("meta-llama/Llama-3.1-8B-Instruct", 1000, 200),
+        ])
+        summary = session_monitor.get_global_usage_summary(self.config_data)
+
+        by_model = {m["model"]: m for m in summary["usage_by_model"]}
+        self.assertIsNone(by_model["meta-llama/Llama-3.1-8B-Instruct"]["cost"])
+        self.assertIsNotNone(by_model["claude-3-5-sonnet"]["cost"])
+        self.assertAlmostEqual(summary["total_cost"], calculate_call_cost("claude-3-5-sonnet", 10000, 2000))
+
     def test_get_global_usage_summary_empty_when_no_sessions(self):
         summary = session_monitor.get_global_usage_summary(self.config_data)
         self.assertEqual(summary["session_count"], 0)
@@ -247,6 +274,30 @@ class TestSessionMonitor(unittest.TestCase):
         sessions = session_monitor.get_all_sessions(self.config_data)
         self.assertIsNone(sessions[0]["context_percent"])
         self.assertIsNone(sessions[0]["context_window"])
+
+    def test_get_all_sessions_cost_none_for_explicitly_unpriced_model(self):
+        """
+        Unlike a model missing from config entirely, an explicitly
+        "unpriced": true default (e.g. Llama 3.1 8B Instruct) still has a
+        context_window - only cost must come back None, never $0.
+        """
+        self._write_session("proj-m", "session13", [
+            _usage_line("meta-llama/Llama-3.1-8B-Instruct", 1000, 200)
+        ])
+        sessions = session_monitor.get_all_sessions(self.config_data)
+        s = sessions[0]
+        self.assertIsNone(s["cost"])
+        self.assertIsNotNone(s["context_percent"])
+
+    def test_get_all_sessions_mixed_priced_and_unpriced_models_sums_only_priced(self):
+        """A session using both a priced and an explicitly-unpriced model must total only the priced one's cost."""
+        self._write_session("proj-n", "session14", [
+            _usage_line("claude-3-5-sonnet", 10000, 2000),
+            _usage_line("meta-llama/Llama-3.1-8B-Instruct", 1000, 200),
+        ])
+        sessions = session_monitor.get_all_sessions(self.config_data)
+        s = sessions[0]
+        self.assertAlmostEqual(s["cost"], calculate_call_cost("claude-3-5-sonnet", 10000, 2000))
 
     def test_get_rolling_window_usage_buckets_by_recency(self):
         now = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc)

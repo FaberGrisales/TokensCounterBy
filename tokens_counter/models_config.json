@@ -104,5 +104,79 @@
         "cache_read_cost_per_1m": 0.1,
         "supports_caching": true,
         "context_window": 300000
+    },
+    "gpt-4o": {
+        "name": "GPT-4o",
+        "provider": "OpenAI",
+        "input_cost_per_1m": 2.5,
+        "output_cost_per_1m": 10.0,
+        "cache_write_cost_per_1m": 0.0,
+        "cache_read_cost_per_1m": 1.25,
+        "supports_caching": true,
+        "context_window": 128000
+    },
+    "gpt-4o-mini": {
+        "name": "GPT-4o Mini",
+        "provider": "OpenAI",
+        "input_cost_per_1m": 0.15,
+        "output_cost_per_1m": 0.6,
+        "cache_write_cost_per_1m": 0.0,
+        "cache_read_cost_per_1m": 0.075,
+        "supports_caching": true,
+        "context_window": 128000
+    },
+    "gpt-4.1": {
+        "name": "GPT-4.1",
+        "provider": "OpenAI",
+        "input_cost_per_1m": 2.0,
+        "output_cost_per_1m": 8.0,
+        "cache_write_cost_per_1m": 0.0,
+        "cache_read_cost_per_1m": 0.5,
+        "supports_caching": true,
+        "context_window": 1000000
+    },
+    "gpt-4.1-mini": {
+        "name": "GPT-4.1 Mini",
+        "provider": "OpenAI",
+        "input_cost_per_1m": 0.4,
+        "output_cost_per_1m": 1.6,
+        "cache_write_cost_per_1m": 0.0,
+        "cache_read_cost_per_1m": 0.1,
+        "supports_caching": true,
+        "context_window": 1000000
+    },
+    "o1-mini": {
+        "name": "OpenAI o1-mini",
+        "provider": "OpenAI",
+        "input_cost_per_1m": 1.1,
+        "output_cost_per_1m": 4.4,
+        "cache_write_cost_per_1m": 0.0,
+        "cache_read_cost_per_1m": 0.55,
+        "supports_caching": true,
+        "context_window": 128000
+    },
+    "meta-llama/Llama-3.1-8B-Instruct": {
+        "name": "Llama 3.1 8B Instruct",
+        "provider": "Hugging Face",
+        "unpriced": true,
+        "context_window": 128000
+    },
+    "meta-llama/Llama-3.1-70B-Instruct": {
+        "name": "Llama 3.1 70B Instruct",
+        "provider": "Hugging Face",
+        "unpriced": true,
+        "context_window": 128000
+    },
+    "Qwen/Qwen2.5-7B-Instruct": {
+        "name": "Qwen2.5 7B Instruct",
+        "provider": "Hugging Face",
+        "unpriced": true,
+        "context_window": 32768
+    },
+    "mistralai/Mistral-7B-Instruct-v0.3": {
+        "name": "Mistral 7B Instruct v0.3",
+        "provider": "Hugging Face",
+        "unpriced": true,
+        "context_window": 32768
     }
 }
