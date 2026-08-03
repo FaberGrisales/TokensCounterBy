@@ -40,20 +40,23 @@ class TestTokensCalculator(unittest.TestCase):
         cost = calculate_call_cost("claude-3-5-sonnet", 10000, 2000, cached_read_tokens=8000)
         self.assertAlmostEqual(cost, 0.0384)
 
-def _usage_line(model, input_tokens, output_tokens, cache_read=0, cache_write=0, timestamp="2026-01-01T00:00:00.000Z", cwd="/home/user/project"):
+def _usage_line(model, input_tokens, output_tokens, cache_read=0, cache_write=0, timestamp="2026-01-01T00:00:00.000Z", cwd="/home/user/project", tool_names=None):
+    message = {
+        "model": model,
+        "usage": {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cache_read_input_tokens": cache_read,
+            "cache_creation_input_tokens": cache_write
+        }
+    }
+    if tool_names:
+        message["content"] = [{"type": "tool_use", "name": name, "input": {}} for name in tool_names]
     return json.dumps({
         "type": "assistant",
         "timestamp": timestamp,
         "cwd": cwd,
-        "message": {
-            "model": model,
-            "usage": {
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
-                "cache_read_input_tokens": cache_read,
-                "cache_creation_input_tokens": cache_write
-            }
-        }
+        "message": message
     })
 
 
@@ -345,6 +348,42 @@ class TestSessionMonitor(unittest.TestCase):
         session_summary, breakdown = session_monitor.get_subagent_breakdown("does-not-exist", self.config_data)
         self.assertIsNone(session_summary)
         self.assertEqual(breakdown, [])
+
+
+    def test_get_mcp_tool_usage_aggregates_calls_and_cost(self):
+        self._write_session("proj-q", "session17", [
+            _usage_line("claude-3-5-sonnet", 1000, 200, tool_names=["mcp__filesystem__read_file", "mcp__filesystem__list_dir"])
+        ])
+        usage = session_monitor.get_mcp_tool_usage(self.config_data)
+        self.assertEqual(len(usage), 1)
+        s = usage[0]
+        self.assertEqual(s["server"], "filesystem")
+        self.assertEqual(s["tools"], {"read_file": 1, "list_dir": 1})
+        self.assertEqual(s["total_calls"], 2)
+        self.assertEqual(s["turns"], 1)
+        self.assertEqual(s["input_tokens"], 1000)
+        self.assertAlmostEqual(s["cost"], calculate_call_cost("claude-3-5-sonnet", 1000, 200))
+
+    def test_get_mcp_tool_usage_ignores_non_mcp_tools(self):
+        self._write_session("proj-r", "session18", [
+            _usage_line("claude-3-5-sonnet", 100, 50, tool_names=["Bash", "Read"])
+        ])
+        usage = session_monitor.get_mcp_tool_usage(self.config_data)
+        self.assertEqual(usage, [])
+
+    def test_get_mcp_tool_usage_turn_touching_two_servers_counted_under_both(self):
+        self._write_session("proj-s", "session19", [
+            _usage_line("claude-3-5-sonnet", 1000, 200, tool_names=["mcp__filesystem__read_file", "mcp__web__search"])
+        ])
+        usage = session_monitor.get_mcp_tool_usage(self.config_data)
+        servers = {s["server"]: s for s in usage}
+        self.assertEqual(set(servers.keys()), {"filesystem", "web"})
+        self.assertEqual(servers["filesystem"]["input_tokens"], 1000)
+        self.assertEqual(servers["web"]["input_tokens"], 1000)
+
+    def test_get_mcp_tool_usage_empty_when_no_calls(self):
+        self._write_session("proj-t", "session20", [_usage_line("claude-3-5-sonnet", 100, 50)])
+        self.assertEqual(session_monitor.get_mcp_tool_usage(self.config_data), [])
 
 
 class TestClaudeConfig(unittest.TestCase):

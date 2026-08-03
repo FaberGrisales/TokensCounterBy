@@ -75,6 +75,10 @@ def main():
             mcp_servers = claude_config.get_mcp_servers()
             hooks = claude_config.get_hooks_config()
             tui.render_claude_config(mcp_servers, hooks)
+
+            tui.console.print("[dim]Scanning local session transcripts for real MCP tool calls ...[/]\n")
+            mcp_usage = session_monitor.get_mcp_tool_usage(config_data)
+            tui.render_mcp_tool_usage(mcp_usage)
             input("\nPress Enter to return...")
 
         elif choice == "4":

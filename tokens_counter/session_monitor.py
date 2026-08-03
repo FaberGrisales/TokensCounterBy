@@ -58,7 +58,12 @@ def find_session_groups():
 
 
 def _iter_usage_lines(path):
-    """Yield token-usage metadata for each assistant message in a transcript file. Never reads message text/content."""
+    """
+    Yield token-usage metadata for each assistant message in a transcript
+    file, plus the `name` of any tool it called (`tool_names`, e.g.
+    "mcp__filesystem__read_file" or "Bash") - never the tool's arguments or
+    result, and never any text/reasoning content.
+    """
     try:
         with open(path, "r", encoding="utf-8") as f:
             for line in f:
@@ -84,6 +89,15 @@ def _iter_usage_lines(path):
                     # doesn't inflate request counts or clutter the model list.
                     continue
 
+                tool_names = []
+                content = message.get("content")
+                if isinstance(content, list):
+                    for block in content:
+                        if isinstance(block, dict) and block.get("type") == "tool_use":
+                            name = block.get("name")
+                            if isinstance(name, str):
+                                tool_names.append(name)
+
                 yield {
                     "timestamp": entry.get("timestamp"),
                     "cwd": entry.get("cwd"),
@@ -92,9 +106,104 @@ def _iter_usage_lines(path):
                     "output_tokens": usage.get("output_tokens", 0) or 0,
                     "cache_read_tokens": usage.get("cache_read_input_tokens", 0) or 0,
                     "cache_write_tokens": usage.get("cache_creation_input_tokens", 0) or 0,
+                    "tool_names": tool_names,
                 }
     except (OSError, UnicodeDecodeError):
         return
+
+
+def _parse_mcp_tool_name(name):
+    """
+    Splits a Claude Code MCP tool_use name ('mcp__<server>__<tool>') into
+    (server, tool). Returns None for non-MCP tool names (e.g. "Bash", "Read").
+    Server names can themselves contain underscores, so only the LAST "__"
+    is treated as the server/tool separator.
+    """
+    if not name.startswith("mcp__"):
+        return None
+    rest = name[len("mcp__"):]
+    if "__" not in rest:
+        return None
+    server, tool = rest.rsplit("__", 1)
+    return server, tool
+
+
+def get_mcp_tool_usage(config_data):
+    """
+    Aggregates real local MCP tool_use invocations across every local
+    session (main + subagents), grouped by MCP server: how many times each
+    tool was called, and the token/cost of the turns that called it.
+
+    Honesty caveat this deliberately keeps visible in the UI: Claude bills
+    per TURN (one assistant message), not per individual tool call, and a
+    single turn can call more than one tool - including tools from more than
+    one MCP server - alongside its own text/reasoning. So the token/cost
+    figures here are "cost of turns that used this server at least once",
+    not a precise marginal cost of each call; a turn touching two servers
+    gets counted under both. `total_calls` (how many times each tool_use
+    block actually appeared) IS exact and isn't subject to that caveat. This
+    mirrors how get_rolling_window_usage() documents exactly what its numbers
+    do and don't measure instead of fabricating false precision.
+    """
+    servers = defaultdict(lambda: {
+        "tools": defaultdict(int), "turns": 0,
+        "input": 0, "output": 0, "cache_read": 0, "cache_write": 0,
+        "cost": 0.0, "any_priced": False, "last_timestamp": None
+    })
+
+    for group in find_session_groups():
+        for _, path in [(False, group["main"])] + [(True, p) for p in group["subagents"]]:
+            for usage_line in _iter_usage_lines(path):
+                mcp_servers_in_turn = set()
+                for name in usage_line.get("tool_names") or []:
+                    parsed = _parse_mcp_tool_name(name)
+                    if parsed is None:
+                        continue
+                    server, tool = parsed
+                    servers[server]["tools"][tool] += 1
+                    mcp_servers_in_turn.add(server)
+
+                if not mcp_servers_in_turn:
+                    continue
+
+                model = usage_line["model"]
+                cost = None
+                if model in config_data:
+                    cost = calculate_call_cost(
+                        model, usage_line["input_tokens"], usage_line["output_tokens"],
+                        cached_read_tokens=usage_line["cache_read_tokens"], cached_write_tokens=usage_line["cache_write_tokens"]
+                    )
+
+                for server in mcp_servers_in_turn:
+                    s = servers[server]
+                    s["turns"] += 1
+                    s["input"] += usage_line["input_tokens"]
+                    s["output"] += usage_line["output_tokens"]
+                    s["cache_read"] += usage_line["cache_read_tokens"]
+                    s["cache_write"] += usage_line["cache_write_tokens"]
+                    if cost is not None:
+                        s["cost"] += cost
+                        s["any_priced"] = True
+                    ts = usage_line["timestamp"]
+                    if ts and (s["last_timestamp"] is None or ts > s["last_timestamp"]):
+                        s["last_timestamp"] = ts
+
+    result = []
+    for server, s in servers.items():
+        result.append({
+            "server": server,
+            "tools": dict(s["tools"]),
+            "total_calls": sum(s["tools"].values()),
+            "turns": s["turns"],
+            "input_tokens": s["input"],
+            "output_tokens": s["output"],
+            "cache_read_tokens": s["cache_read"],
+            "cache_write_tokens": s["cache_write"],
+            "cost": s["cost"] if s["any_priced"] else None,
+            "last_timestamp": s["last_timestamp"],
+        })
+    result.sort(key=lambda s: s["total_calls"], reverse=True)
+    return result
 
 
 def _safe_mtime(path):

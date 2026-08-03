@@ -93,8 +93,10 @@ Inspirada en los comandos `/mcp` y `/hooks` de Claude Code. Muestra:
 
 - **Servidores MCP configurados**: leídos de `.mcp.json` en la raíz del proyecto (donde ejecutas `python3 start.py`) y de tu `~/.claude.json` (tanto servidores globales como los específicos de este proyecto).
 - **Hooks configurados**: leídos de `.claude/settings.json` y `.claude/settings.local.json` del proyecto, y de tu `~/.claude/settings.json` de usuario — evento, matcher, y cuántos comandos tiene cada hook.
+- **MCP Tool Usage**: cuánto has usado realmente cada servidor MCP configurado, escaneando todas tus transcripciones locales en busca de llamadas reales a herramientas (`tool_use`) cuyo nombre empiece con `mcp__<servidor>__<herramienta>`. Muestra, por servidor: qué herramientas llamaste y cuántas veces (**Calls**, exacto), y el costo de los turnos que usaron ese servidor al menos una vez (**Turn Cost**).
+  - **Importante sobre "Turn Cost"**: Claude cobra por **turno** (todo el mensaje del asistente), no por llamada a herramienta individual, y un solo turno puede llamar a varias herramientas — incluso de servidores MCP distintos — junto con su propio texto/razonamiento. Por eso "Turn Cost" es el costo de los turnos que usaron ese servidor, no un costo exacto por llamada: si un turno toca dos servidores, ese turno se cuenta en ambos. Solo **Calls** (cuántas veces se ejecutó cada herramienta) es un número exacto.
 
-**Limitación honesta:** esta opción no lee políticas de configuración administradas a nivel de organización (managed settings / managed MCP), solo el alcance de proyecto + usuario. Como el resto de la app, es de solo lectura: nunca modifica tu configuración.
+**Limitación honesta:** esta opción no lee políticas de configuración administradas a nivel de organización (managed settings / managed MCP), solo el alcance de proyecto + usuario. Como el resto de la app, es de solo lectura: nunca modifica tu configuración ni lee los argumentos/resultados de las llamadas a herramientas, solo su nombre.
 
 ---
 

@@ -429,6 +429,62 @@ def render_global_usage_live_view(status, rolling_usage, data):
     renderables.append("[dim]Refreshing every few seconds · Press Ctrl+C to stop and return to the menu[/]")
     return Group(*renderables)
 
+def _format_tool_counts(tools, max_tools=5):
+    """Formats a {tool_name: call_count} dict as 'read_file x3, list_dir x1' (top tools by count, capped)."""
+    items = sorted(tools.items(), key=lambda kv: kv[1], reverse=True)
+    shown = ", ".join(f"{name} x{count}" for name, count in items[:max_tools])
+    if len(items) > max_tools:
+        shown += f" [dim](+{len(items) - max_tools} more)[/]"
+    return shown or "-"
+
+def render_mcp_tool_usage(usage):
+    """
+    Renders real local MCP tool_use call counts and per-server turn cost,
+    from session_monitor.get_mcp_tool_usage(). See that function's docstring
+    for the important caveat this table's footer note also states: turn cost
+    is attributed to every MCP server used in that turn, not split precisely
+    per tool call, since Claude bills per turn rather than per tool call.
+    """
+    table = Table(box=box.ROUNDED, border_style="green", title="[bold green]MCP Tool Usage (real local calls)[/]")
+    table.add_column("Server", style="bold green")
+    table.add_column("Tools Called", style="white")
+    table.add_column("Calls", justify="right")
+    table.add_column("Turns", justify="right")
+    table.add_column("Tokens (In/Out)", justify="right")
+    table.add_column("Turn Cost", justify="right", style="bold yellow")
+
+    for s in usage[:MAX_TABLE_ROWS]:
+        cost_str = f"${s['cost']:.4f}" if s["cost"] is not None else "[dim]N/A[/]"
+        table.add_row(
+            s["server"],
+            _format_tool_counts(s["tools"]),
+            f"{s['total_calls']:,}",
+            f"{s['turns']:,}",
+            f"{s['input_tokens']:,} / {s['output_tokens']:,}",
+            cost_str
+        )
+
+    if not usage:
+        table.add_row("-", "No local MCP tool calls found in any session transcript", "-", "-", "-", "-")
+    elif len(usage) > MAX_TABLE_ROWS:
+        table.add_row(f"[dim]+{len(usage) - MAX_TABLE_ROWS} more[/]", "", "", "", "", "")
+
+    console.print(table, justify="center")
+    console.print()
+
+    if usage:
+        console.print(Panel(
+            Text(
+                "\"Turn Cost\" is the cost of the assistant turns that called this server at least once - not a "
+                "precise per-call cost. Claude bills per turn, not per tool call, and one turn can call more than "
+                "one tool (including tools from more than one MCP server), so a turn touching two servers is "
+                "counted under both. \"Calls\" (how many times each tool actually ran) is exact.",
+                style="dim", justify="left"
+            ),
+            border_style="dim", width=95
+        ), justify="center")
+        console.print()
+
 def render_claude_config(mcp_servers, hooks):
     """
     Renders MCP servers and hooks configured for Claude Code, read from its
