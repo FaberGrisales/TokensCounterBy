@@ -331,59 +331,63 @@ class TestSessionMonitor(unittest.TestCase):
         group = session_monitor.find_session_groups()[0]
         self.assertEqual(session_monitor.build_subagent_breakdown(group, self.config_data), [])
 
-    def test_get_subagent_breakdown_finds_session_by_id(self):
+    def test_get_session_breakdown_finds_session_by_id(self):
         self._write_session(
             "proj-p", "session16",
             [_usage_line("claude-3-5-sonnet", 1000, 200)],
             subagent_lines=[_usage_line("claude-3-5-haiku", 500, 100)],
             subagent_meta={"agentType": "general-purpose", "description": "Task X"}
         )
-        session_summary, breakdown = session_monitor.get_subagent_breakdown("session16", self.config_data)
+        session_summary, subagents, mcp_calls = session_monitor.get_session_breakdown("session16", self.config_data)
         self.assertIsNotNone(session_summary)
         self.assertEqual(session_summary["session_id"], "session16")
-        self.assertEqual(len(breakdown), 1)
-        self.assertEqual(breakdown[0]["agent_type"], "general-purpose")
+        self.assertEqual(len(subagents), 1)
+        self.assertEqual(subagents[0]["agent_type"], "general-purpose")
+        self.assertEqual(mcp_calls, [])
 
-    def test_get_subagent_breakdown_none_for_unknown_session(self):
-        session_summary, breakdown = session_monitor.get_subagent_breakdown("does-not-exist", self.config_data)
+    def test_get_session_breakdown_none_for_unknown_session(self):
+        session_summary, subagents, mcp_calls = session_monitor.get_session_breakdown("does-not-exist", self.config_data)
         self.assertIsNone(session_summary)
-        self.assertEqual(breakdown, [])
+        self.assertEqual(subagents, [])
+        self.assertEqual(mcp_calls, [])
 
-
-    def test_get_mcp_tool_usage_aggregates_calls_and_cost(self):
+    def test_build_mcp_call_log_reads_calls_and_turn_cost(self):
         self._write_session("proj-q", "session17", [
             _usage_line("claude-3-5-sonnet", 1000, 200, tool_names=["mcp__filesystem__read_file", "mcp__filesystem__list_dir"])
         ])
-        usage = session_monitor.get_mcp_tool_usage(self.config_data)
-        self.assertEqual(len(usage), 1)
-        s = usage[0]
-        self.assertEqual(s["server"], "filesystem")
-        self.assertEqual(s["tools"], {"read_file": 1, "list_dir": 1})
-        self.assertEqual(s["total_calls"], 2)
-        self.assertEqual(s["turns"], 1)
-        self.assertEqual(s["input_tokens"], 1000)
-        self.assertAlmostEqual(s["cost"], calculate_call_cost("claude-3-5-sonnet", 1000, 200))
+        group = session_monitor.find_session_groups()[0]
+        calls = session_monitor.build_mcp_call_log(group, self.config_data)
+        self.assertEqual(len(calls), 1)
+        c = calls[0]
+        self.assertEqual(c["source"], "Main")
+        self.assertEqual(c["tools"], ["mcp__filesystem__read_file", "mcp__filesystem__list_dir"])
+        self.assertEqual(c["input_tokens"], 1000)
+        self.assertAlmostEqual(c["cost"], calculate_call_cost("claude-3-5-sonnet", 1000, 200))
 
-    def test_get_mcp_tool_usage_ignores_non_mcp_tools(self):
+    def test_build_mcp_call_log_ignores_turns_with_no_mcp_tools(self):
         self._write_session("proj-r", "session18", [
             _usage_line("claude-3-5-sonnet", 100, 50, tool_names=["Bash", "Read"])
         ])
-        usage = session_monitor.get_mcp_tool_usage(self.config_data)
-        self.assertEqual(usage, [])
+        group = session_monitor.find_session_groups()[0]
+        self.assertEqual(session_monitor.build_mcp_call_log(group, self.config_data), [])
 
-    def test_get_mcp_tool_usage_turn_touching_two_servers_counted_under_both(self):
-        self._write_session("proj-s", "session19", [
-            _usage_line("claude-3-5-sonnet", 1000, 200, tool_names=["mcp__filesystem__read_file", "mcp__web__search"])
-        ])
-        usage = session_monitor.get_mcp_tool_usage(self.config_data)
-        servers = {s["server"]: s for s in usage}
-        self.assertEqual(set(servers.keys()), {"filesystem", "web"})
-        self.assertEqual(servers["filesystem"]["input_tokens"], 1000)
-        self.assertEqual(servers["web"]["input_tokens"], 1000)
+    def test_build_mcp_call_log_includes_subagent_calls_with_agent_type_as_source(self):
+        self._write_session(
+            "proj-s", "session19",
+            [_usage_line("claude-3-5-sonnet", 100, 50)],
+            subagent_lines=[_usage_line("claude-3-5-haiku", 500, 100, tool_names=["mcp__web__search"])],
+            subagent_meta={"agentType": "Explore", "description": "Look something up"}
+        )
+        group = session_monitor.find_session_groups()[0]
+        calls = session_monitor.build_mcp_call_log(group, self.config_data)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["source"], "Explore")
+        self.assertEqual(calls[0]["tools"], ["mcp__web__search"])
 
-    def test_get_mcp_tool_usage_empty_when_no_calls(self):
+    def test_build_mcp_call_log_empty_when_no_calls(self):
         self._write_session("proj-t", "session20", [_usage_line("claude-3-5-sonnet", 100, 50)])
-        self.assertEqual(session_monitor.get_mcp_tool_usage(self.config_data), [])
+        group = session_monitor.find_session_groups()[0]
+        self.assertEqual(session_monitor.build_mcp_call_log(group, self.config_data), [])
 
 
 class TestClaudeConfig(unittest.TestCase):

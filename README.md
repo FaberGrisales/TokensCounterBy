@@ -34,7 +34,7 @@ Una vez iniciado, verás el menú principal con las siguientes opciones:
 1. **Live Session Monitor**: Ve en tiempo real qué sesiones de Claude Code están activas en esta máquina, cuánto está gastando cada una, y qué tan llena está su ventana de contexto (ver sección de abajo).
 2. **Global Claude Usage (like /usage)**: Estado de tu suscripción de Claude y una foto fija de tu consumo en esta máquina, inspirada en el comando real `/usage` de Claude Code (ver sección de abajo).
 3. **Claude Code Config (MCP & Hooks)**: Qué servidores MCP y qué hooks tienes configurados para este proyecto, inspirado en los comandos `/mcp` y `/hooks` (ver sección de abajo).
-4. **Subagent Breakdown**: Elegís una sesión y ves, subagente por subagente, exactamente cuántos tokens/cuánto costó cada invocación individual (cada llamada a la herramienta "Task") (ver sección de abajo).
+4. **Session Breakdown**: Elegís una sesión y ves, subagente por subagente y **llamada MCP por llamada MCP**, exactamente cuántos tokens/cuánto costó cada invocación individual (ver sección de abajo).
 5. **Exit**: Cierra la aplicación.
 
 Los precios por modelo de Claude viven en `tokens_counter/models_config.json` (editable a mano) — de ahí sale el costo que ves en las Opciones 1 y 2.
@@ -93,22 +93,29 @@ Inspirada en los comandos `/mcp` y `/hooks` de Claude Code. Muestra:
 
 - **Servidores MCP configurados**: leídos de `.mcp.json` en la raíz del proyecto (donde ejecutas `python3 start.py`) y de tu `~/.claude.json` (tanto servidores globales como los específicos de este proyecto).
 - **Hooks configurados**: leídos de `.claude/settings.json` y `.claude/settings.local.json` del proyecto, y de tu `~/.claude/settings.json` de usuario — evento, matcher, y cuántos comandos tiene cada hook.
-- **MCP Tool Usage**: cuánto has usado realmente cada servidor MCP configurado, escaneando todas tus transcripciones locales en busca de llamadas reales a herramientas (`tool_use`) cuyo nombre empiece con `mcp__<servidor>__<herramienta>`. Muestra, por servidor: qué herramientas llamaste y cuántas veces (**Calls**, exacto), y el costo de los turnos que usaron ese servidor al menos una vez (**Turn Cost**).
-  - **Importante sobre "Turn Cost"**: Claude cobra por **turno** (todo el mensaje del asistente), no por llamada a herramienta individual, y un solo turno puede llamar a varias herramientas — incluso de servidores MCP distintos — junto con su propio texto/razonamiento. Por eso "Turn Cost" es el costo de los turnos que usaron ese servidor, no un costo exacto por llamada: si un turno toca dos servidores, ese turno se cuenta en ambos. Solo **Calls** (cuántas veces se ejecutó cada herramienta) es un número exacto.
 
-**Limitación honesta:** esta opción no lee políticas de configuración administradas a nivel de organización (managed settings / managed MCP), solo el alcance de proyecto + usuario. Como el resto de la app, es de solo lectura: nunca modifica tu configuración ni lee los argumentos/resultados de las llamadas a herramientas, solo su nombre.
+**Limitación honesta:** esta opción no lee políticas de configuración administradas a nivel de organización (managed settings / managed MCP), solo el alcance de proyecto + usuario. Como el resto de la app, es de solo lectura: nunca modifica tu configuración.
+
+(¿Buscas cuánto ha consumido realmente cada llamada MCP? Eso vive en la Opción 4 — ver abajo — porque el consumo real solo tiene sentido a nivel de una sesión/turno concreto, no como un listado de configuración.)
 
 ---
 
-## 🧩 Subagent Breakdown (Opción 4)
+## 🧩 Session Breakdown (Opción 4)
 
-El Live Session Monitor (Opción 1) suma el consumo de todos los subagentes de una sesión en un solo total. Esta opción lo desglosa: elegís una sesión de la lista (solo aparecen las que tienen al menos un subagente) y ves una tabla que se refresca sola con **una fila por subagente**, mostrando:
+El Live Session Monitor (Opción 1) suma el consumo de todos los subagentes y llamadas MCP de una sesión en un solo total. Esta opción lo desglosa: elegís una sesión de la lista y ves dos tablas que se refrescan solas:
 
+**Subagents** — una fila por subagente:
 - **Agent Type**: qué tipo de subagente fue (`Explore`, `general-purpose`, etc.).
 - **Task**: la descripción corta de la tarea que se le asignó — la misma etiqueta de una línea que ya se ve en la transcripción de Claude Code para cada llamada a la herramienta "Task". Nunca se lee ni se muestra el prompt/respuesta real del subagente, igual que en el resto de la app.
 - **Model(s)**, **Reqs**, **Tokens (In/Out)**, **Cache (Read/Write)** y **Cost**: el consumo real de esa invocación puntual, calculado con las mismas tarifas de `models_config.json`.
 
 Cómo funciona: Claude Code guarda cada subagente en su propio archivo `<session-id>/subagents/**/*.jsonl`, más un `.meta.json` al lado con el `agentType` y la descripción de la tarea. Esta opción lee ambos por separado en vez de fusionarlos en el total de la sesión.
+
+**MCP Calls** — una fila por **cada turno/instrucción real** dentro de esa sesión que ejecutó al menos una llamada a una herramienta MCP (nombre `mcp__<servidor>__<herramienta>`), ordenado del más reciente:
+- **Time / Source**: cuándo ocurrió y si fue en la conversación principal o en un subagente.
+- **Tool(s) Called**: qué herramienta(s) MCP se llamaron en ese turno (solo el nombre — nunca los argumentos ni el resultado de la llamada).
+- **Tokens (In/Out) / Turn Cost**: el consumo real de ese turno específico.
+  - **Importante sobre "Turn Cost"**: Claude cobra por **turno** completo (todo el mensaje del asistente), no por llamada a herramienta individual, y un solo turno puede llamar a varias herramientas — incluso de servidores MCP distintos — junto con su propio texto/razonamiento. Por eso es el costo del turno que hizo esa llamada, no un costo aislado exacto solo de la llamada; si un turno toca dos servidores, ambos figuran con ese mismo turno. La lista de qué herramientas se llamaron sí es exacta.
 
 Presiona **Ctrl+C** para detener y volver al menú.
 

@@ -185,13 +185,15 @@ def render_session_monitor_view(sessions):
 
     return Group(header, table, footer)
 
-def render_subagent_breakdown_view(session_id, session_summary, subagents):
+def render_session_breakdown_view(session_id, session_summary, subagents, mcp_calls):
     """
-    Builds (does not print) a per-subagent token/cost breakdown for one
-    session, so you can see exactly how much a single subagent invocation
-    (one "Task" tool call) consumed rather than only the session-wide total.
-    Meant to be passed to rich.live.Live.update() for a self-refreshing view.
-    See session_monitor.build_subagent_breakdown() for how each row is built.
+    Builds (does not print) a single session's per-subagent breakdown plus
+    its per-turn MCP tool-call log, so you can see exactly how much a single
+    subagent invocation OR a single prompt/turn that called an MCP tool
+    consumed, rather than only the session-wide total. Meant to be passed to
+    rich.live.Live.update() for a self-refreshing view. See
+    session_monitor.build_subagent_breakdown() / build_mcp_call_log() for how
+    each row is built.
     """
     if session_summary is None:
         return Group(f"[yellow]Session {session_id} not found (its transcript may have been removed).[/]")
@@ -199,25 +201,25 @@ def render_subagent_breakdown_view(session_id, session_summary, subagents):
     project_label = os.path.basename(session_summary["cwd"]) if session_summary.get("cwd") else session_summary["project"]
     header = Panel(
         f"[bold green]{project_label}[/]  [dim]{session_id}[/]\n"
-        f"[cyan]Subagents found:[/] {len(subagents)}",
-        title="[bold cyan]Subagent Breakdown[/]",
+        f"[cyan]Subagents found:[/] {len(subagents)}   [cyan]MCP calls found:[/] {len(mcp_calls)}",
+        title="[bold cyan]Session Breakdown[/]",
         border_style="cyan",
         box=box.DOUBLE,
         width=92
     )
 
-    table = Table(box=box.ROUNDED, border_style="yellow", title="[bold yellow]Subagents (most recently active first)[/]")
-    table.add_column("Agent Type", style="bold green")
-    table.add_column("Task", style="white")
-    table.add_column("Model(s)", style="cyan")
-    table.add_column("Reqs", justify="right")
-    table.add_column("Tokens (In/Out)", justify="right")
-    table.add_column("Cache (Read/Write)", justify="right")
-    table.add_column("Cost", justify="right", style="bold yellow")
+    subagent_table = Table(box=box.ROUNDED, border_style="yellow", title="[bold yellow]Subagents (most recently active first)[/]")
+    subagent_table.add_column("Agent Type", style="bold green")
+    subagent_table.add_column("Task", style="white")
+    subagent_table.add_column("Model(s)", style="cyan")
+    subagent_table.add_column("Reqs", justify="right")
+    subagent_table.add_column("Tokens (In/Out)", justify="right")
+    subagent_table.add_column("Cache (Read/Write)", justify="right")
+    subagent_table.add_column("Cost", justify="right", style="bold yellow")
 
     for a in subagents[:15]:
         cost_str = f"${a['cost']:.4f}" if a["cost"] is not None else "[dim]N/A[/]"
-        table.add_row(
+        subagent_table.add_row(
             a["agent_type"],
             a.get("description") or "[dim]-[/]",
             ", ".join(a["models"]) or "-",
@@ -226,13 +228,41 @@ def render_subagent_breakdown_view(session_id, session_summary, subagents):
             f"{a['cache_read_tokens']:,} / {a['cache_write_tokens']:,}",
             cost_str
         )
-
     if not subagents:
-        table.add_row("-", "No subagents found for this session", "-", "-", "-", "-", "-")
+        subagent_table.add_row("-", "No subagents found for this session", "-", "-", "-", "-", "-")
 
-    footer = "[dim]Refreshing every few seconds · Press Ctrl+C to stop and return to the menu[/]"
+    mcp_table = Table(box=box.ROUNDED, border_style="green", title="[bold green]MCP Calls (one row per turn, most recent first)[/]")
+    mcp_table.add_column("Time", style="dim")
+    mcp_table.add_column("Source", style="bold green")
+    mcp_table.add_column("Tool(s) Called", style="white")
+    mcp_table.add_column("Tokens (In/Out)", justify="right")
+    mcp_table.add_column("Turn Cost", justify="right", style="bold yellow")
 
-    return Group(header, table, footer)
+    for c in mcp_calls[:15]:
+        cost_str = f"${c['cost']:.4f}" if c["cost"] is not None else "[dim]N/A[/]"
+        tool_labels = []
+        for name in c["tools"]:
+            rest = name[len("mcp__"):] if name.startswith("mcp__") else name
+            server, _, tool = rest.rpartition("__")
+            tool_labels.append(f"{server}/{tool}" if server else rest)
+        mcp_table.add_row(
+            _format_local_time(c["timestamp"]),
+            c["source"],
+            ", ".join(tool_labels) or "-",
+            f"{c['input_tokens']:,} / {c['output_tokens']:,}",
+            cost_str
+        )
+    if not mcp_calls:
+        mcp_table.add_row("-", "No MCP tool calls found for this session", "-", "-", "-")
+
+    footer_lines = ["[dim]Refreshing every few seconds · Press Ctrl+C to stop and return to the menu[/]"]
+    if mcp_calls:
+        footer_lines.insert(0,
+            "[dim]\"Turn Cost\" is the cost of the whole assistant turn that called this tool, not an isolated "
+            "per-call cost - Claude bills per turn, and one turn can call more than one tool.[/]"
+        )
+
+    return Group(header, subagent_table, mcp_table, *footer_lines)
 
 MAX_TABLE_ROWS = 8
 
@@ -428,62 +458,6 @@ def render_global_usage_live_view(status, rolling_usage, data):
     renderables += _build_usage_summary_renderables(data)
     renderables.append("[dim]Refreshing every few seconds · Press Ctrl+C to stop and return to the menu[/]")
     return Group(*renderables)
-
-def _format_tool_counts(tools, max_tools=5):
-    """Formats a {tool_name: call_count} dict as 'read_file x3, list_dir x1' (top tools by count, capped)."""
-    items = sorted(tools.items(), key=lambda kv: kv[1], reverse=True)
-    shown = ", ".join(f"{name} x{count}" for name, count in items[:max_tools])
-    if len(items) > max_tools:
-        shown += f" [dim](+{len(items) - max_tools} more)[/]"
-    return shown or "-"
-
-def render_mcp_tool_usage(usage):
-    """
-    Renders real local MCP tool_use call counts and per-server turn cost,
-    from session_monitor.get_mcp_tool_usage(). See that function's docstring
-    for the important caveat this table's footer note also states: turn cost
-    is attributed to every MCP server used in that turn, not split precisely
-    per tool call, since Claude bills per turn rather than per tool call.
-    """
-    table = Table(box=box.ROUNDED, border_style="green", title="[bold green]MCP Tool Usage (real local calls)[/]")
-    table.add_column("Server", style="bold green")
-    table.add_column("Tools Called", style="white")
-    table.add_column("Calls", justify="right")
-    table.add_column("Turns", justify="right")
-    table.add_column("Tokens (In/Out)", justify="right")
-    table.add_column("Turn Cost", justify="right", style="bold yellow")
-
-    for s in usage[:MAX_TABLE_ROWS]:
-        cost_str = f"${s['cost']:.4f}" if s["cost"] is not None else "[dim]N/A[/]"
-        table.add_row(
-            s["server"],
-            _format_tool_counts(s["tools"]),
-            f"{s['total_calls']:,}",
-            f"{s['turns']:,}",
-            f"{s['input_tokens']:,} / {s['output_tokens']:,}",
-            cost_str
-        )
-
-    if not usage:
-        table.add_row("-", "No local MCP tool calls found in any session transcript", "-", "-", "-", "-")
-    elif len(usage) > MAX_TABLE_ROWS:
-        table.add_row(f"[dim]+{len(usage) - MAX_TABLE_ROWS} more[/]", "", "", "", "", "")
-
-    console.print(table, justify="center")
-    console.print()
-
-    if usage:
-        console.print(Panel(
-            Text(
-                "\"Turn Cost\" is the cost of the assistant turns that called this server at least once - not a "
-                "precise per-call cost. Claude bills per turn, not per tool call, and one turn can call more than "
-                "one tool (including tools from more than one MCP server), so a turn touching two servers is "
-                "counted under both. \"Calls\" (how many times each tool actually ran) is exact.",
-                style="dim", justify="left"
-            ),
-            border_style="dim", width=95
-        ), justify="center")
-        console.print()
 
 def render_claude_config(mcp_servers, hooks):
     """

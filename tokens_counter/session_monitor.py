@@ -128,82 +128,54 @@ def _parse_mcp_tool_name(name):
     return server, tool
 
 
-def get_mcp_tool_usage(config_data):
+def build_mcp_call_log(group, config_data):
     """
-    Aggregates real local MCP tool_use invocations across every local
-    session (main + subagents), grouped by MCP server: how many times each
-    tool was called, and the token/cost of the turns that called it.
+    Per-turn log of every local MCP tool_use call within one session (main +
+    subagents), most recent first - the actual "what did this specific
+    prompt/instruction consume" view, as opposed to a history-wide aggregate.
+    Each row is one assistant turn that called at least one MCP tool, with
+    which tool(s) it called and that turn's own token/cost.
 
-    Honesty caveat this deliberately keeps visible in the UI: Claude bills
-    per TURN (one assistant message), not per individual tool call, and a
-    single turn can call more than one tool - including tools from more than
-    one MCP server - alongside its own text/reasoning. So the token/cost
-    figures here are "cost of turns that used this server at least once",
-    not a precise marginal cost of each call; a turn touching two servers
-    gets counted under both. `total_calls` (how many times each tool_use
-    block actually appeared) IS exact and isn't subject to that caveat. This
-    mirrors how get_rolling_window_usage() documents exactly what its numbers
-    do and don't measure instead of fabricating false precision.
+    Honesty caveat this deliberately keeps visible in the UI (see
+    tui.render_session_breakdown_view()): Claude bills per TURN (one
+    assistant message), not per individual tool call, and a single turn can
+    call more than one tool - including tools from more than one MCP server
+    - alongside its own text/reasoning. So a row's tokens/cost describe the
+    whole turn, not an isolated cost for just that one tool call. `tools`
+    (the exact tool_use names in that turn) IS an exact count of what ran.
     """
-    servers = defaultdict(lambda: {
-        "tools": defaultdict(int), "turns": 0,
-        "input": 0, "output": 0, "cache_read": 0, "cache_write": 0,
-        "cost": 0.0, "any_priced": False, "last_timestamp": None
-    })
+    rows = []
+    for path in [group["main"]] + group["subagents"]:
+        is_subagent = path != group["main"]
+        source = _read_subagent_meta(path).get("agentType", "Subagent") if is_subagent else "Main"
 
-    for group in find_session_groups():
-        for _, path in [(False, group["main"])] + [(True, p) for p in group["subagents"]]:
-            for usage_line in _iter_usage_lines(path):
-                mcp_servers_in_turn = set()
-                for name in usage_line.get("tool_names") or []:
-                    parsed = _parse_mcp_tool_name(name)
-                    if parsed is None:
-                        continue
-                    server, tool = parsed
-                    servers[server]["tools"][tool] += 1
-                    mcp_servers_in_turn.add(server)
+        for usage_line in _iter_usage_lines(path):
+            mcp_tools = [n for n in (usage_line.get("tool_names") or []) if _parse_mcp_tool_name(n)]
+            if not mcp_tools:
+                continue
 
-                if not mcp_servers_in_turn:
-                    continue
+            model = usage_line["model"]
+            cost = None
+            if model in config_data:
+                cost = calculate_call_cost(
+                    model, usage_line["input_tokens"], usage_line["output_tokens"],
+                    cached_read_tokens=usage_line["cache_read_tokens"], cached_write_tokens=usage_line["cache_write_tokens"]
+                )
 
-                model = usage_line["model"]
-                cost = None
-                if model in config_data:
-                    cost = calculate_call_cost(
-                        model, usage_line["input_tokens"], usage_line["output_tokens"],
-                        cached_read_tokens=usage_line["cache_read_tokens"], cached_write_tokens=usage_line["cache_write_tokens"]
-                    )
+            rows.append({
+                "timestamp": _parse_timestamp(usage_line["timestamp"]),
+                "source": source,
+                "tools": mcp_tools,
+                "model": model,
+                "input_tokens": usage_line["input_tokens"],
+                "output_tokens": usage_line["output_tokens"],
+                "cache_read_tokens": usage_line["cache_read_tokens"],
+                "cache_write_tokens": usage_line["cache_write_tokens"],
+                "cost": cost,
+            })
 
-                for server in mcp_servers_in_turn:
-                    s = servers[server]
-                    s["turns"] += 1
-                    s["input"] += usage_line["input_tokens"]
-                    s["output"] += usage_line["output_tokens"]
-                    s["cache_read"] += usage_line["cache_read_tokens"]
-                    s["cache_write"] += usage_line["cache_write_tokens"]
-                    if cost is not None:
-                        s["cost"] += cost
-                        s["any_priced"] = True
-                    ts = usage_line["timestamp"]
-                    if ts and (s["last_timestamp"] is None or ts > s["last_timestamp"]):
-                        s["last_timestamp"] = ts
-
-    result = []
-    for server, s in servers.items():
-        result.append({
-            "server": server,
-            "tools": dict(s["tools"]),
-            "total_calls": sum(s["tools"].values()),
-            "turns": s["turns"],
-            "input_tokens": s["input"],
-            "output_tokens": s["output"],
-            "cache_read_tokens": s["cache_read"],
-            "cache_write_tokens": s["cache_write"],
-            "cost": s["cost"] if s["any_priced"] else None,
-            "last_timestamp": s["last_timestamp"],
-        })
-    result.sort(key=lambda s: s["total_calls"], reverse=True)
-    return result
+    rows.sort(key=lambda r: r["timestamp"] or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
+    return rows
 
 
 def _safe_mtime(path):
@@ -405,27 +377,31 @@ def build_subagent_breakdown(group, config_data):
     return results
 
 
-def get_subagent_breakdown(session_id, config_data):
+def get_session_breakdown(session_id, config_data):
     """
     Finds the session group whose main transcript stem matches `session_id`
-    and returns (session_summary, subagent_breakdown). session_summary is
-    None if the session no longer exists (e.g. its transcript was removed
-    between the picker list and this call).
+    and returns (session_summary, subagent_breakdown, mcp_call_log).
+    session_summary is None if the session no longer exists (e.g. its
+    transcript was removed between the picker list and this call).
     """
     for group in find_session_groups():
         if group["main"].stem == session_id:
-            return build_session_summary(group, config_data), build_subagent_breakdown(group, config_data)
-    return None, []
+            return (
+                build_session_summary(group, config_data),
+                build_subagent_breakdown(group, config_data),
+                build_mcp_call_log(group, config_data),
+            )
+    return None, [], []
 
 
-def watch_subagent_breakdown(session_id, config_data, refresh_seconds=3):
-    """Render a live-updating per-subagent breakdown for one session until interrupted (Ctrl+C)."""
+def watch_session_breakdown(session_id, config_data, refresh_seconds=3):
+    """Render a live-updating per-subagent + per-MCP-call breakdown for one session until interrupted (Ctrl+C)."""
     from rich.live import Live
-    from tokens_counter.tui import console, render_subagent_breakdown_view
+    from tokens_counter.tui import console, render_session_breakdown_view
 
     def snapshot():
-        session_summary, subagents = get_subagent_breakdown(session_id, config_data)
-        return render_subagent_breakdown_view(session_id, session_summary, subagents)
+        session_summary, subagents, mcp_calls = get_session_breakdown(session_id, config_data)
+        return render_session_breakdown_view(session_id, session_summary, subagents, mcp_calls)
 
     with Live(snapshot(), console=console, refresh_per_second=4) as live:
         while True:
