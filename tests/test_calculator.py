@@ -73,7 +73,7 @@ class TestSessionMonitor(unittest.TestCase):
             os.environ["CLAUDE_CONFIG_DIR"] = self._prev_config_dir
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
-    def _write_session(self, project, session_id, lines, subagent_lines=None):
+    def _write_session(self, project, session_id, lines, subagent_lines=None, subagent_meta=None):
         project_dir = os.path.join(self.temp_dir, "projects", project)
         os.makedirs(project_dir, exist_ok=True)
         with open(os.path.join(project_dir, f"{session_id}.jsonl"), "w") as f:
@@ -83,6 +83,9 @@ class TestSessionMonitor(unittest.TestCase):
             os.makedirs(subagents_dir, exist_ok=True)
             with open(os.path.join(subagents_dir, "agent-1.jsonl"), "w") as f:
                 f.write("\n".join(subagent_lines) + "\n")
+            if subagent_meta is not None:
+                with open(os.path.join(subagents_dir, "agent-1.meta.json"), "w") as f:
+                    json.dump(subagent_meta, f)
 
     def test_get_all_sessions_basic_cost_and_activity(self):
         self._write_session("proj-a", "session1", [
@@ -285,6 +288,63 @@ class TestSessionMonitor(unittest.TestCase):
         self.assertIsNone(w["window_start_at"])
         self.assertIsNone(w["elapsed_seconds"])
         self.assertIsNone(w["percent_used"])
+
+
+    def test_build_subagent_breakdown_reads_meta_and_tokens(self):
+        self._write_session(
+            "proj-m", "session13",
+            [_usage_line("claude-3-5-sonnet", 1000, 200)],
+            subagent_lines=[_usage_line("claude-3-5-haiku", 500, 100, cache_read=50)],
+            subagent_meta={"agentType": "Explore", "description": "Find the pricing config"}
+        )
+        group = session_monitor.find_session_groups()[0]
+        breakdown = session_monitor.build_subagent_breakdown(group, self.config_data)
+
+        self.assertEqual(len(breakdown), 1)
+        a = breakdown[0]
+        self.assertEqual(a["agent_type"], "Explore")
+        self.assertEqual(a["description"], "Find the pricing config")
+        self.assertEqual(a["requests"], 1)
+        self.assertEqual(a["input_tokens"], 500)
+        self.assertEqual(a["output_tokens"], 100)
+        self.assertAlmostEqual(
+            a["cost"],
+            calculate_call_cost("claude-3-5-haiku", 500, 100, cached_read_tokens=50)
+        )
+
+    def test_build_subagent_breakdown_defaults_when_no_meta_file(self):
+        self._write_session(
+            "proj-n", "session14",
+            [_usage_line("claude-3-5-sonnet", 1000, 200)],
+            subagent_lines=[_usage_line("claude-3-5-haiku", 500, 100)]
+        )
+        group = session_monitor.find_session_groups()[0]
+        breakdown = session_monitor.build_subagent_breakdown(group, self.config_data)
+        self.assertEqual(breakdown[0]["agent_type"], "unknown")
+        self.assertIsNone(breakdown[0]["description"])
+
+    def test_build_subagent_breakdown_empty_when_no_subagents(self):
+        self._write_session("proj-o", "session15", [_usage_line("claude-3-5-sonnet", 100, 50)])
+        group = session_monitor.find_session_groups()[0]
+        self.assertEqual(session_monitor.build_subagent_breakdown(group, self.config_data), [])
+
+    def test_get_subagent_breakdown_finds_session_by_id(self):
+        self._write_session(
+            "proj-p", "session16",
+            [_usage_line("claude-3-5-sonnet", 1000, 200)],
+            subagent_lines=[_usage_line("claude-3-5-haiku", 500, 100)],
+            subagent_meta={"agentType": "general-purpose", "description": "Task X"}
+        )
+        session_summary, breakdown = session_monitor.get_subagent_breakdown("session16", self.config_data)
+        self.assertIsNotNone(session_summary)
+        self.assertEqual(session_summary["session_id"], "session16")
+        self.assertEqual(len(breakdown), 1)
+        self.assertEqual(breakdown[0]["agent_type"], "general-purpose")
+
+    def test_get_subagent_breakdown_none_for_unknown_session(self):
+        session_summary, breakdown = session_monitor.get_subagent_breakdown("does-not-exist", self.config_data)
+        self.assertIsNone(session_summary)
+        self.assertEqual(breakdown, [])
 
 
 class TestClaudeConfig(unittest.TestCase):

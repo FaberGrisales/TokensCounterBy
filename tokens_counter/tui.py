@@ -185,6 +185,55 @@ def render_session_monitor_view(sessions):
 
     return Group(header, table, footer)
 
+def render_subagent_breakdown_view(session_id, session_summary, subagents):
+    """
+    Builds (does not print) a per-subagent token/cost breakdown for one
+    session, so you can see exactly how much a single subagent invocation
+    (one "Task" tool call) consumed rather than only the session-wide total.
+    Meant to be passed to rich.live.Live.update() for a self-refreshing view.
+    See session_monitor.build_subagent_breakdown() for how each row is built.
+    """
+    if session_summary is None:
+        return Group(f"[yellow]Session {session_id} not found (its transcript may have been removed).[/]")
+
+    project_label = os.path.basename(session_summary["cwd"]) if session_summary.get("cwd") else session_summary["project"]
+    header = Panel(
+        f"[bold green]{project_label}[/]  [dim]{session_id}[/]\n"
+        f"[cyan]Subagents found:[/] {len(subagents)}",
+        title="[bold cyan]Subagent Breakdown[/]",
+        border_style="cyan",
+        box=box.DOUBLE,
+        width=92
+    )
+
+    table = Table(box=box.ROUNDED, border_style="yellow", title="[bold yellow]Subagents (most recently active first)[/]")
+    table.add_column("Agent Type", style="bold green")
+    table.add_column("Task", style="white")
+    table.add_column("Model(s)", style="cyan")
+    table.add_column("Reqs", justify="right")
+    table.add_column("Tokens (In/Out)", justify="right")
+    table.add_column("Cache (Read/Write)", justify="right")
+    table.add_column("Cost", justify="right", style="bold yellow")
+
+    for a in subagents[:15]:
+        cost_str = f"${a['cost']:.4f}" if a["cost"] is not None else "[dim]N/A[/]"
+        table.add_row(
+            a["agent_type"],
+            a.get("description") or "[dim]-[/]",
+            ", ".join(a["models"]) or "-",
+            f"{a['requests']:,}",
+            f"{a['input_tokens']:,} / {a['output_tokens']:,}",
+            f"{a['cache_read_tokens']:,} / {a['cache_write_tokens']:,}",
+            cost_str
+        )
+
+    if not subagents:
+        table.add_row("-", "No subagents found for this session", "-", "-", "-", "-", "-")
+
+    footer = "[dim]Refreshing every few seconds · Press Ctrl+C to stop and return to the menu[/]"
+
+    return Group(header, table, footer)
+
 MAX_TABLE_ROWS = 8
 
 def _build_subscription_status_renderables(status, rolling_usage=None):

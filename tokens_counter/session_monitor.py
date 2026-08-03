@@ -219,6 +219,111 @@ def build_session_summary(group, config_data, now=None):
     }
 
 
+def _read_subagent_meta(subagent_path):
+    """
+    Reads the sibling `<agent-id>.meta.json` Claude Code writes next to each
+    subagent transcript (same directory, same stem, `.meta.json` extension).
+    It holds only short task metadata - `agentType` (which subagent role was
+    spawned, e.g. "Explore", "general-purpose") and `description` (a short
+    one-line task label, the same text Claude Code's own transcript UI shows
+    next to a Task tool call) - never the subagent's actual prompt/response
+    content. Returns {} if the file is missing or malformed.
+    """
+    meta_path = subagent_path.with_suffix(".meta.json")
+    try:
+        with open(meta_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def build_subagent_breakdown(group, config_data):
+    """
+    Per-subagent token/cost breakdown for one session group, so you can see
+    exactly how much a single subagent invocation (a "Task" tool call, e.g.
+    one Explore/general-purpose agent run) consumed, rather than only the
+    session-wide total. Returns a list of dicts, most recently active first.
+    """
+    results = []
+    for path in group["subagents"]:
+        by_model = defaultdict(lambda: {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0})
+        requests = 0
+        last_timestamp = None
+
+        for usage_line in _iter_usage_lines(path):
+            model = usage_line["model"]
+            by_model[model]["input"] += usage_line["input_tokens"]
+            by_model[model]["output"] += usage_line["output_tokens"]
+            by_model[model]["cache_read"] += usage_line["cache_read_tokens"]
+            by_model[model]["cache_write"] += usage_line["cache_write_tokens"]
+            requests += 1
+            if usage_line["timestamp"] and (last_timestamp is None or usage_line["timestamp"] > last_timestamp):
+                last_timestamp = usage_line["timestamp"]
+
+        if requests == 0:
+            continue
+
+        cost = 0.0
+        has_priced_model = False
+        for model, tokens in by_model.items():
+            if model not in config_data:
+                continue
+            has_priced_model = True
+            cost += calculate_call_cost(
+                model, tokens["input"], tokens["output"],
+                cached_read_tokens=tokens["cache_read"], cached_write_tokens=tokens["cache_write"]
+            )
+
+        meta = _read_subagent_meta(path)
+
+        results.append({
+            "agent_id": path.stem,
+            "agent_type": meta.get("agentType") or "unknown",
+            "description": meta.get("description"),
+            "models": sorted(by_model.keys()),
+            "requests": requests,
+            "input_tokens": sum(m["input"] for m in by_model.values()),
+            "output_tokens": sum(m["output"] for m in by_model.values()),
+            "cache_read_tokens": sum(m["cache_read"] for m in by_model.values()),
+            "cache_write_tokens": sum(m["cache_write"] for m in by_model.values()),
+            "cost": cost if has_priced_model else None,
+            "last_timestamp": last_timestamp,
+            "mtime": _safe_mtime(path),
+        })
+
+    results.sort(key=lambda a: a["mtime"], reverse=True)
+    return results
+
+
+def get_subagent_breakdown(session_id, config_data):
+    """
+    Finds the session group whose main transcript stem matches `session_id`
+    and returns (session_summary, subagent_breakdown). session_summary is
+    None if the session no longer exists (e.g. its transcript was removed
+    between the picker list and this call).
+    """
+    for group in find_session_groups():
+        if group["main"].stem == session_id:
+            return build_session_summary(group, config_data), build_subagent_breakdown(group, config_data)
+    return None, []
+
+
+def watch_subagent_breakdown(session_id, config_data, refresh_seconds=3):
+    """Render a live-updating per-subagent breakdown for one session until interrupted (Ctrl+C)."""
+    from rich.live import Live
+    from tokens_counter.tui import console, render_subagent_breakdown_view
+
+    def snapshot():
+        session_summary, subagents = get_subagent_breakdown(session_id, config_data)
+        return render_subagent_breakdown_view(session_id, session_summary, subagents)
+
+    with Live(snapshot(), console=console, refresh_per_second=4) as live:
+        while True:
+            time.sleep(refresh_seconds)
+            live.update(snapshot())
+
+
 def get_all_sessions(config_data, now=None):
     """Return a summary per local Claude Code session, most recently active first."""
     now = time.time() if now is None else now

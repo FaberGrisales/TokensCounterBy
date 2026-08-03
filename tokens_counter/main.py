@@ -22,7 +22,8 @@ def main():
             "1": "Live Session Monitor (Claude Code usage 🔎)",
             "2": "Global Claude Usage (like /usage 📊)",
             "3": "Claude Code Config (MCP & Hooks 🔧)",
-            "4": "Exit 🚪"
+            "4": "Subagent Breakdown (per-agent tokens 🧩)",
+            "5": "Exit 🚪"
         }
 
         tui.render_menu(menu_options)
@@ -77,6 +78,44 @@ def main():
             input("\nPress Enter to return...")
 
         elif choice == "4":
+            # Per-subagent breakdown: pick a session, then see exactly how
+            # many tokens/how much cost each individual subagent invocation
+            # (each "Task" tool call) consumed, instead of only the
+            # session-wide total the Live Session Monitor shows.
+            tui.clear_screen()
+            tui.console.print("[bold green]=== SUBAGENT BREAKDOWN (per-agent tokens) ===[/]\n")
+            tui.console.print("[dim]Scanning local sessions under ~/.claude/projects ...[/]\n")
+
+            sessions = [s for s in session_monitor.get_all_sessions(config_data) if s["subagent_count"] > 0]
+            if not sessions:
+                tui.console.print("[yellow]No local session with subagents found.[/]")
+                input("\nPress Enter to return...")
+                continue
+
+            picker = {}
+            for i, s in enumerate(sessions[:15], start=1):
+                project_label = os.path.basename(s["cwd"]) if s.get("cwd") else s["project"]
+                status = "[bold green]● LIVE[/]" if s["is_active"] else "[dim]○ idle[/]"
+                tui.console.print(
+                    f"  [{i}] {status} {project_label} "
+                    f"[dim]{s['session_id'][:8]}…[/] — {s['subagent_count']} subagent(s)"
+                )
+                picker[str(i)] = s["session_id"]
+            tui.console.print("  [0] Cancel\n")
+
+            pick = Prompt.ask("Select a session", choices=list(picker.keys()) + ["0"], default="1")
+            if pick == "0":
+                continue
+
+            tui.console.print("\n[yellow]Press Ctrl+C to stop and return to the menu.[/]\n")
+            try:
+                session_monitor.watch_subagent_breakdown(picker[pick], config_data)
+            except KeyboardInterrupt:
+                pass
+            tui.console.print("\n[bold yellow]Monitor stopped.[/]")
+            input("\nPress Enter to return...")
+
+        elif choice == "5":
             tui.clear_screen()
             tui.console.print("\n[bold cyan]Exiting Token Monitor. Goodbye![/]")
             break

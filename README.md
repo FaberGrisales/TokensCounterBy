@@ -34,7 +34,8 @@ Una vez iniciado, verás el menú principal con las siguientes opciones:
 1. **Live Session Monitor**: Ve en tiempo real qué sesiones de Claude Code están activas en esta máquina, cuánto está gastando cada una, y qué tan llena está su ventana de contexto (ver sección de abajo).
 2. **Global Claude Usage (like /usage)**: Estado de tu suscripción de Claude y una foto fija de tu consumo en esta máquina, inspirada en el comando real `/usage` de Claude Code (ver sección de abajo).
 3. **Claude Code Config (MCP & Hooks)**: Qué servidores MCP y qué hooks tienes configurados para este proyecto, inspirado en los comandos `/mcp` y `/hooks` (ver sección de abajo).
-4. **Exit**: Cierra la aplicación.
+4. **Subagent Breakdown**: Elegís una sesión y ves, subagente por subagente, exactamente cuántos tokens/cuánto costó cada invocación individual (cada llamada a la herramienta "Task") (ver sección de abajo).
+5. **Exit**: Cierra la aplicación.
 
 Los precios por modelo de Claude viven en `tokens_counter/models_config.json` (editable a mano) — de ahí sale el costo que ves en las Opciones 1 y 2.
 
@@ -94,6 +95,20 @@ Inspirada en los comandos `/mcp` y `/hooks` de Claude Code. Muestra:
 - **Hooks configurados**: leídos de `.claude/settings.json` y `.claude/settings.local.json` del proyecto, y de tu `~/.claude/settings.json` de usuario — evento, matcher, y cuántos comandos tiene cada hook.
 
 **Limitación honesta:** esta opción no lee políticas de configuración administradas a nivel de organización (managed settings / managed MCP), solo el alcance de proyecto + usuario. Como el resto de la app, es de solo lectura: nunca modifica tu configuración.
+
+---
+
+## 🧩 Subagent Breakdown (Opción 4)
+
+El Live Session Monitor (Opción 1) suma el consumo de todos los subagentes de una sesión en un solo total. Esta opción lo desglosa: elegís una sesión de la lista (solo aparecen las que tienen al menos un subagente) y ves una tabla que se refresca sola con **una fila por subagente**, mostrando:
+
+- **Agent Type**: qué tipo de subagente fue (`Explore`, `general-purpose`, etc.).
+- **Task**: la descripción corta de la tarea que se le asignó — la misma etiqueta de una línea que ya se ve en la transcripción de Claude Code para cada llamada a la herramienta "Task". Nunca se lee ni se muestra el prompt/respuesta real del subagente, igual que en el resto de la app.
+- **Model(s)**, **Reqs**, **Tokens (In/Out)**, **Cache (Read/Write)** y **Cost**: el consumo real de esa invocación puntual, calculado con las mismas tarifas de `models_config.json`.
+
+Cómo funciona: Claude Code guarda cada subagente en su propio archivo `<session-id>/subagents/**/*.jsonl`, más un `.meta.json` al lado con el `agentType` y la descripción de la tarea. Esta opción lee ambos por separado en vez de fusionarlos en el total de la sesión.
+
+Presiona **Ctrl+C** para detener y volver al menú.
 
 ---
 
