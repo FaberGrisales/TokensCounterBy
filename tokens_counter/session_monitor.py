@@ -1,5 +1,6 @@
 import os
 import json
+import shutil
 import time
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
@@ -15,6 +16,13 @@ from tokens_counter.config import calculate_call_cost
 # (not a stable public API) so parsing failures are handled gracefully
 # instead of raising - a format change should degrade to "no data", not crash.
 ACTIVE_THRESHOLD_SECONDS = 300
+
+# How long a session must have been idle before it's offered as a cleanup
+# candidate in main.py's Option 5. Deliberately much longer than
+# ACTIVE_THRESHOLD_SECONDS (which just distinguishes "LIVE" from "idle" in
+# the live monitor) - this one gates real, irreversible file deletion, so it
+# defaults to a week of true inactivity rather than a few idle minutes.
+CLEANUP_INACTIVE_THRESHOLD_SECONDS = 7 * 24 * 60 * 60
 
 
 def get_claude_config_dir():
@@ -419,6 +427,56 @@ def get_all_sessions(config_data, now=None):
             summaries.append(summary)
     summaries.sort(key=lambda s: s["mtime"], reverse=True)
     return summaries
+
+
+def get_cleanup_candidates(config_data, now=None, threshold_seconds=CLEANUP_INACTIVE_THRESHOLD_SECONDS):
+    """
+    Returns sessions that have been inactive for at least `threshold_seconds`
+    (default CLEANUP_INACTIVE_THRESHOLD_SECONDS, 7 days), most-inactive
+    first, for main.py's Option 5 cleanup picker. Each candidate is a normal
+    build_session_summary() dict plus `age_seconds` and the actual
+    `main_path`/`subagent_paths` delete_session() needs to remove it - kept
+    on the same dict so the picker never has to re-look-up a session by ID
+    between listing it and deleting it.
+    """
+    now = time.time() if now is None else now
+    candidates = []
+    for group in find_session_groups():
+        summary = build_session_summary(group, config_data, now=now)
+        if summary is None:
+            continue
+        age_seconds = now - summary["mtime"]
+        if age_seconds < threshold_seconds:
+            continue
+        candidates.append({
+            **summary,
+            "age_seconds": age_seconds,
+            "main_path": group["main"],
+            "subagent_paths": group["subagents"],
+        })
+    candidates.sort(key=lambda c: c["mtime"])
+    return candidates
+
+
+def delete_session(candidate):
+    """
+    Permanently deletes one session's main transcript file and its
+    `<session-id>/subagents/` directory (if any) from disk. This is real,
+    irreversible deletion of Claude Code's own local history files - not
+    reversible by this app, and not something Claude Code itself exposes a
+    command for. Only ever call this after explicit user confirmation.
+    Returns (success: bool, error_message: str or None).
+    """
+    main_path = candidate["main_path"]
+    session_dir = main_path.parent / main_path.stem
+    try:
+        if main_path.exists():
+            main_path.unlink()
+        if session_dir.is_dir():
+            shutil.rmtree(session_dir)
+        return True, None
+    except OSError as e:
+        return False, str(e)
 
 
 def get_global_usage_summary(config_data):

@@ -2,7 +2,9 @@
 
 Un visualizador de terminal (TUI) del uso y costo real de **Claude Code** en tu máquina: qué sesiones están activas, cuánto han gastado, qué tan llena está su ventana de contexto, el estado de tu suscripción, y qué servidores MCP/hooks tienes configurados.
 
-Esta app **no hace llamadas a ninguna API** y **no necesita ninguna clave**. Es de solo lectura: todo lo que muestra viene de leer los transcripts y archivos de configuración que **Claude Code ya guarda localmente** en tu máquina (`~/.claude/projects`, `~/.claude.json`, `.mcp.json`, `.claude/settings.json`). No hay modo simulado/estimado, ni mecánicas de juego, ni nada que se conecte a internet por su cuenta.
+Esta app **no hace llamadas a ninguna API** y **no necesita ninguna clave**. Todo lo que muestra viene de leer los transcripts y archivos de configuración que **Claude Code ya guarda localmente** en tu máquina (`~/.claude/projects`, `~/.claude.json`, `.mcp.json`, `.claude/settings.json`). No hay modo simulado/estimado, ni mecánicas de juego, ni nada que se conecte a internet por su cuenta.
+
+Las Opciones 1-4 son de solo lectura. La única excepción es la Opción 5 (Cleanup), que sí puede borrar archivos reales — siempre con confirmación explícita, nunca automático (ver sección de abajo).
 
 ---
 
@@ -35,7 +37,8 @@ Una vez iniciado, verás el menú principal con las siguientes opciones:
 2. **Global Claude Usage (like /usage)**: Estado de tu suscripción de Claude y una foto fija de tu consumo en esta máquina, inspirada en el comando real `/usage` de Claude Code (ver sección de abajo).
 3. **Claude Code Config (MCP & Hooks)**: Qué servidores MCP y qué hooks tienes configurados para este proyecto, inspirado en los comandos `/mcp` y `/hooks` (ver sección de abajo).
 4. **Session Breakdown**: Elegís una sesión y ves, subagente por subagente y **llamada MCP por llamada MCP**, exactamente cuántos tokens/cuánto costó cada invocación individual (ver sección de abajo).
-5. **Exit**: Cierra la aplicación.
+5. **Cleanup Inactive Sessions**: Borra permanentemente sesiones locales sin actividad hace 7+ días, con selección manual y confirmación explícita (ver sección de abajo).
+6. **Exit**: Cierra la aplicación.
 
 Los precios por modelo de Claude viven en `tokens_counter/models_config.json` (editable a mano) — de ahí sale el costo que ves en las Opciones 1 y 2.
 
@@ -118,6 +121,21 @@ Cómo funciona: Claude Code guarda cada subagente en su propio archivo `<session
   - **Importante sobre "Turn Cost"**: Claude cobra por **turno** completo (todo el mensaje del asistente), no por llamada a herramienta individual, y un solo turno puede llamar a varias herramientas — incluso de servidores MCP distintos — junto con su propio texto/razonamiento. Por eso es el costo del turno que hizo esa llamada, no un costo aislado exacto solo de la llamada; si un turno toca dos servidores, ambos figuran con ese mismo turno. La lista de qué herramientas se llamaron sí es exacta.
 
 Presiona **Ctrl+C** para detener y volver al menú.
+
+---
+
+## 🗑️ Cleanup Inactive Sessions (Opción 5)
+
+Con el tiempo, `~/.claude/projects` acumula un transcript por cada sesión que abriste alguna vez. Esta opción te deja borrar los que ya no te sirven — **es la única acción destructiva de toda la app**, así que tiene varias capas de seguridad antes de tocar un solo archivo.
+
+Cómo funciona:
+
+1. Busca sesiones **sin ninguna actividad en los últimos 7 días** (un umbral distinto y mucho más largo que el de 5 minutos que separa `● LIVE` de `○ idle` en el resto de la app) y las muestra en una tabla, ordenadas de la más vieja a la más reciente, con cuánto tiempo lleva inactiva, sus tokens y su costo acumulado.
+2. Elegís cuáles borrar escribiendo los números separados por coma (`1,3,5`), `all` para todas las de la lista, o `c` para cancelar sin tocar nada.
+3. Antes de borrar, te muestra la lista exacta de lo que vas a eliminar y te pide escribir **`DELETE`** (la palabra completa, en mayúsculas) para confirmar. Cualquier otra cosa cancela.
+4. Borra el archivo `.jsonl` principal de cada sesión elegida, y si tenía subagentes, también su carpeta `<session-id>/subagents/`.
+
+**Esto es permanente.** Una vez borrado, ni esta app ni Claude Code pueden recuperar ese historial — no hay papelera de reciclaje. Las sesiones con actividad reciente (menos de 7 días) nunca aparecen en la lista, así que no hay riesgo de borrar algo que estés usando activamente.
 
 ---
 

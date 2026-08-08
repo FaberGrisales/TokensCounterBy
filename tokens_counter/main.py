@@ -23,7 +23,8 @@ def main():
             "2": "Global Claude Usage (like /usage 📊)",
             "3": "Claude Code Config (MCP & Hooks 🔧)",
             "4": "Session Breakdown (subagents + MCP calls 🧩)",
-            "5": "Exit 🚪"
+            "5": "Cleanup Inactive Sessions (delete 🗑️)",
+            "6": "Exit 🚪"
         }
 
         tui.render_menu(menu_options)
@@ -117,6 +118,82 @@ def main():
             input("\nPress Enter to return...")
 
         elif choice == "5":
+            # Cleanup: find sessions inactive for 7+ days and let the user
+            # pick which ones to permanently delete (main transcript +
+            # subagent files). This is the one destructive action in the
+            # app - real, irreversible deletion of local Claude Code
+            # history - so it requires seeing the exact list, picking
+            # specific sessions, and typing "DELETE" to confirm.
+            tui.clear_screen()
+            tui.console.print("[bold red]=== CLEANUP INACTIVE SESSIONS ===[/]\n")
+            tui.console.print("[dim]Scanning local sessions under ~/.claude/projects for sessions inactive 7+ days ...[/]\n")
+
+            candidates = session_monitor.get_cleanup_candidates(config_data)
+            if not candidates:
+                tui.console.print("[green]No sessions inactive for more than 7 days. Nothing to clean up.[/]")
+                input("\nPress Enter to return...")
+                continue
+
+            tui.render_cleanup_candidates(candidates)
+            tui.console.print(
+                "[yellow]Deleting a session permanently removes its local transcript file(s) - "
+                "this cannot be undone, and Claude Code has no way to recover it.[/]\n"
+            )
+
+            selection = Prompt.ask(
+                "Enter numbers to delete (e.g. 1,3,5), 'all', or 'c' to cancel",
+                default="c"
+            )
+            if selection.strip().lower() in ("c", "cancel", ""):
+                continue
+
+            if selection.strip().lower() == "all":
+                chosen = list(candidates)
+            else:
+                chosen = []
+                seen_ids = set()
+                for part in selection.split(","):
+                    part = part.strip()
+                    if not part.isdigit():
+                        continue
+                    idx = int(part)
+                    if 1 <= idx <= len(candidates) and candidates[idx - 1]["session_id"] not in seen_ids:
+                        seen_ids.add(candidates[idx - 1]["session_id"])
+                        chosen.append(candidates[idx - 1])
+
+            if not chosen:
+                tui.console.print("[yellow]No valid sessions selected. Nothing deleted.[/]")
+                input("\nPress Enter to return...")
+                continue
+
+            tui.console.print(f"\n[bold red]About to permanently delete {len(chosen)} session(s):[/]")
+            for c in chosen:
+                project_label = os.path.basename(c["cwd"]) if c.get("cwd") else c["project"]
+                tui.console.print(f"  - {project_label} [dim]{c['session_id'][:8]}…[/]")
+
+            confirm = Prompt.ask("\nType DELETE to confirm (anything else cancels)", default="")
+            if confirm.strip() != "DELETE":
+                tui.console.print("[yellow]Cancelled. Nothing was deleted.[/]")
+                input("\nPress Enter to return...")
+                continue
+
+            deleted, failed = 0, []
+            for c in chosen:
+                ok, error = session_monitor.delete_session(c)
+                if ok:
+                    deleted += 1
+                else:
+                    failed.append((c["session_id"], error))
+
+            tui.console.print(f"\n[bold green]Deleted {deleted} session(s).[/]")
+            if failed:
+                tui.console.print("[bold red]Failed to delete:[/]")
+                for session_id, error in failed:
+                    tui.console.print(f"  - {session_id}: {error}")
+
+            input("\nPress Enter to return...")
+
+        elif choice == "6":
             tui.clear_screen()
             tui.console.print("\n[bold cyan]Exiting Token Monitor. Goodbye![/]")
             break

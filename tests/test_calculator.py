@@ -149,6 +149,74 @@ class TestSessionMonitor(unittest.TestCase):
         sessions = session_monitor.get_all_sessions(self.config_data)
         self.assertEqual(sessions, [])
 
+    def test_get_cleanup_candidates_excludes_recent_sessions(self):
+        self._write_session("proj-recent", "session-recent", [_usage_line("claude-3-5-sonnet", 100, 50)])
+        now = session_monitor.time.time() + 3600  # 1 hour later - well under the 7-day default
+        candidates = session_monitor.get_cleanup_candidates(self.config_data, now=now)
+        self.assertEqual(candidates, [])
+
+    def test_get_cleanup_candidates_includes_sessions_older_than_threshold(self):
+        self._write_session("proj-old", "session-old", [_usage_line("claude-3-5-sonnet", 100, 50)])
+        now = session_monitor.time.time() + session_monitor.CLEANUP_INACTIVE_THRESHOLD_SECONDS + 3600
+        candidates = session_monitor.get_cleanup_candidates(self.config_data, now=now)
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0]["session_id"], "session-old")
+        self.assertGreaterEqual(candidates[0]["age_seconds"], session_monitor.CLEANUP_INACTIVE_THRESHOLD_SECONDS)
+
+    def test_get_cleanup_candidates_respects_custom_threshold(self):
+        self._write_session("proj-custom", "session-custom", [_usage_line("claude-3-5-sonnet", 100, 50)])
+        now = session_monitor.time.time() + 3600  # 1 hour later
+        # With a 30-minute threshold, a session an hour old is a candidate.
+        candidates = session_monitor.get_cleanup_candidates(self.config_data, now=now, threshold_seconds=1800)
+        self.assertEqual(len(candidates), 1)
+
+    def test_get_cleanup_candidates_sorts_oldest_first(self):
+        self._write_session("proj-older", "session-older", [_usage_line("claude-3-5-sonnet", 100, 50)])
+        older_path = session_monitor.get_claude_config_dir() / "projects" / "proj-older" / "session-older.jsonl"
+        os.utime(older_path, (session_monitor.time.time() - 1000, session_monitor.time.time() - 1000))
+
+        self._write_session("proj-newer", "session-newer", [_usage_line("claude-3-5-sonnet", 100, 50)])
+        newer_path = session_monitor.get_claude_config_dir() / "projects" / "proj-newer" / "session-newer.jsonl"
+        os.utime(newer_path, (session_monitor.time.time() - 500, session_monitor.time.time() - 500))
+
+        candidates = session_monitor.get_cleanup_candidates(self.config_data, now=session_monitor.time.time(), threshold_seconds=100)
+        self.assertEqual([c["session_id"] for c in candidates], ["session-older", "session-newer"])
+
+    def test_delete_session_removes_main_file_and_subagent_dir(self):
+        self._write_session(
+            "proj-del", "session-del",
+            [_usage_line("claude-3-5-sonnet", 100, 50)],
+            subagent_lines=[_usage_line("claude-3-5-haiku", 50, 20)]
+        )
+        candidates = session_monitor.get_cleanup_candidates(
+            self.config_data, now=session_monitor.time.time(), threshold_seconds=0
+        )
+        self.assertEqual(len(candidates), 1)
+        candidate = candidates[0]
+
+        main_path = candidate["main_path"]
+        session_dir = main_path.parent / main_path.stem
+        self.assertTrue(main_path.exists())
+        self.assertTrue(session_dir.is_dir())
+
+        ok, error = session_monitor.delete_session(candidate)
+        self.assertTrue(ok)
+        self.assertIsNone(error)
+        self.assertFalse(main_path.exists())
+        self.assertFalse(session_dir.exists())
+
+    def test_delete_session_handles_missing_file_without_raising(self):
+        self._write_session("proj-gone", "session-gone", [_usage_line("claude-3-5-sonnet", 100, 50)])
+        candidates = session_monitor.get_cleanup_candidates(
+            self.config_data, now=session_monitor.time.time(), threshold_seconds=0
+        )
+        candidate = candidates[0]
+        candidate["main_path"].unlink()  # simulate the file already being gone
+
+        ok, error = session_monitor.delete_session(candidate)
+        self.assertTrue(ok)
+        self.assertIsNone(error)
+
     def test_get_all_sessions_exposes_by_model_breakdown(self):
         self._write_session(
             "proj-f", "session6",

@@ -459,6 +459,35 @@ def render_global_usage_live_view(status, rolling_usage, data):
     renderables.append("[dim]Refreshing every few seconds · Press Ctrl+C to stop and return to the menu[/]")
     return Group(*renderables)
 
+def render_cleanup_candidates(candidates):
+    """
+    Prints a numbered table of sessions inactive long enough to be cleanup
+    candidates (see session_monitor.get_cleanup_candidates()), most inactive
+    first. main.py uses the printed row numbers to build its interactive
+    picker; this function only renders the list, it never deletes anything.
+    """
+    table = Table(box=box.ROUNDED, border_style="red", title="[bold red]Inactive Sessions (cleanup candidates)[/]")
+    table.add_column("#", justify="right", style="bold yellow")
+    table.add_column("Project / Session", style="bold green")
+    table.add_column("Last Activity", justify="right")
+    table.add_column("Tokens (In/Out)", justify="right")
+    table.add_column("Cost", justify="right")
+
+    for i, c in enumerate(candidates, start=1):
+        project_label = os.path.basename(c["cwd"]) if c.get("cwd") else c["project"]
+        session_label = f"{project_label}\n[dim]{c['session_id'][:8]}…[/]"
+        cost_str = f"${c['cost']:.4f}" if c["cost"] is not None else "[dim]N/A[/]"
+        table.add_row(
+            str(i),
+            session_label,
+            f"{_format_duration(c['age_seconds'])} ago",
+            f"{c['input_tokens']:,} / {c['output_tokens']:,}",
+            cost_str
+        )
+
+    console.print(table, justify="center")
+    console.print()
+
 def render_claude_config(mcp_servers, hooks):
     """
     Renders MCP servers and hooks configured for Claude Code, read from its
