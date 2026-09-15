@@ -50,8 +50,73 @@ def render_menu(options):
         title_align="left",
         border_style="cyan",
         box=box.DOUBLE,
-        width=55
+        width=_panel_width(55)
     ), justify="center")
+
+# Below this console width the full multi-column tables stop fitting: Rich
+# wraps every cell into unreadable slivers and the fixed-width panels below
+# overflow. Under it the views switch to a reduced column set with humanized
+# numbers, so the app stays readable in a small window (which is also what a
+# picture-in-picture / always-on-top mini view needs).
+COMPACT_WIDTH = 100
+
+# Below this, a 5-column table stops working no matter how the widths are
+# assigned: Rich shrinks every column proportionally once their combined
+# minimum exceeds the console, so the status dot collapses to nothing and the
+# cost ellipsizes into "$9.…". Narrower than this the views stack each
+# session onto two short lines instead of tabulating them.
+NARROW_WIDTH = 50
+
+
+def _is_compact():
+    """True when the console is too narrow for the full-width tables."""
+    return console.width < COMPACT_WIDTH
+
+
+def _is_narrow():
+    """True when even the compact table won't fit and rows must stack."""
+    return console.width < NARROW_WIDTH
+
+
+def _panel_width(preferred):
+    """
+    Cap a panel's preferred width at the real console width.
+
+    Rich already clamps an over-wide Panel itself, so this changes no output
+    today - it states the cap explicitly instead of leaving a bare width=92
+    that reads like a bug in a 40-column window, and pins the behaviour if
+    Rich's clamping ever changes. It is NOT what makes the views fit: that's
+    the compact/narrow tiers below. Tables, unlike panels, genuinely do not
+    degrade on their own - Rich keeps all the columns and ellipsizes each one
+    into unreadable slivers ("claude-opu…", "$9.…"), which is the real
+    "the text doesn't adjust when I shrink the terminal" behaviour.
+    """
+    return min(preferred, console.width)
+
+
+def _fmt_tokens(n):
+    """Humanize a token count for narrow layouts: 1234567 -> '1.2M'."""
+    if n is None:
+        return "-"
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M"
+    if n >= 1_000:
+        return f"{n / 1_000:.1f}K"
+    return str(n)
+
+
+def _fmt_cost(cost, compact=False):
+    """
+    Cost as a string, or a dim N/A for an unpriced model. The compact form
+    trades the 4-decimal precision for width, but never rounds a real cost
+    down to a flat $0.00 - that would read as "this was free".
+    """
+    if cost is None:
+        return "[dim]N/A[/]"
+    if not compact:
+        return f"${cost:.4f}"
+    return f"${cost:,.2f}" if cost >= 0.01 else "<$0.01"
+
 
 def _context_bar(percent, length=10):
     """Compact colored bar for context window usage, e.g. '███████░░░ 72%' (mirrors what /context shows)."""
@@ -121,21 +186,77 @@ def render_session_monitor_view(sessions):
     total_input = sum(s["input_tokens"] for s in sessions)
     total_output = sum(s["output_tokens"] for s in sessions)
 
-    header_lines = [
-        f"[bold green]● Active sessions:[/] {len(active)}   [dim]○ Idle (5+ min):[/] {len(idle)}",
-        f"[cyan]Total Input:[/] {total_input:,}  |  [magenta]Total Output:[/] {total_output:,}",
-        f"[bold yellow]Estimated Total Spend:[/] ${total_cost:.4f}"
-    ]
+    compact = _is_compact()
+
+    if compact:
+        header_lines = [
+            f"[bold green]●[/] {len(active)} live   [dim]○[/] {len(idle)} idle",
+            f"[cyan]In[/] {_fmt_tokens(total_input)}   [magenta]Out[/] {_fmt_tokens(total_output)}",
+            f"[bold yellow]Spend[/] {_fmt_cost(total_cost, compact=True)}",
+        ]
+    else:
+        header_lines = [
+            f"[bold green]● Active sessions:[/] {len(active)}   [dim]○ Idle (5+ min):[/] {len(idle)}",
+            f"[cyan]Total Input:[/] {total_input:,}  |  [magenta]Total Output:[/] {total_output:,}",
+            f"[bold yellow]Estimated Total Spend:[/] ${total_cost:.4f}"
+        ]
     if unpriced_count:
-        header_lines.append(f"[dim](+{unpriced_count} session(s) using a model with no price in models_config.json)[/]")
+        header_lines.append(f"[dim](+{unpriced_count} unpriced)[/]" if compact
+                            else f"[dim](+{unpriced_count} session(s) using a model with no price in models_config.json)[/]")
 
     header = Panel(
         "\n".join(header_lines),
-        title="[bold cyan]Claude Code — Live Session Monitor[/]",
+        title="[bold cyan]Sessions[/]" if compact else "[bold cyan]Claude Code — Live Session Monitor[/]",
         border_style="cyan",
         box=box.DOUBLE,
-        width=92
+        width=_panel_width(92)
     )
+
+    if compact:
+        # Five columns is what fits around 46 chars - the width a small
+        # always-on-top window realistically has. Project names get
+        # ellipsized rather than wrapped so each session stays on one line.
+        if _is_narrow():
+            lines = []
+            for s_ in sessions[:15]:
+                project_label = os.path.basename(s_["cwd"]) if s_.get("cwd") else s_["project"]
+                dot = "[bold green]●[/]" if s_["is_active"] else "[dim]○[/]"
+                lines.append(f"{dot} [bold green]{project_label}[/]")
+                lines.append(
+                    f"  {_fmt_tokens(s_['input_tokens'] + s_['output_tokens'])}"
+                    f"  [bold yellow]{_fmt_cost(s_['cost'], compact=True)}[/]"
+                    f"  {_context_bar(s_.get('context_percent'), length=4)}"
+                )
+            if not sessions:
+                lines.append("[dim]No sessions[/]")
+            return Group(header, "\n".join(lines), "[dim]Ctrl+C[/]")
+
+        # Every column except the project name gets an explicit width, so
+        # Rich can only take space from the name. Left flexible, Rich
+        # squeezes whichever column it likes - it will collapse the status
+        # column to zero (the ●/○ silently vanish) and ellipsize the cost
+        # into "$9.…" long before it shortens a long project name.
+        table = Table(box=box.SIMPLE, border_style="yellow", padding=(0, 1), pad_edge=False)
+        table.add_column("S", justify="center", no_wrap=True, width=1)
+        table.add_column("Project", style="bold green", no_wrap=True, overflow="ellipsis")
+        table.add_column("Tokens", justify="right", no_wrap=True, width=6)
+        table.add_column("Cost", justify="right", style="bold yellow", no_wrap=True, width=9)
+        table.add_column("Ctx", justify="center", no_wrap=True, width=9)
+
+        for s_ in sessions[:15]:
+            project_label = os.path.basename(s_["cwd"]) if s_.get("cwd") else s_["project"]
+            table.add_row(
+                "[bold green]●[/]" if s_["is_active"] else "[dim]○[/]",
+                project_label,
+                _fmt_tokens(s_["input_tokens"] + s_["output_tokens"]),
+                _fmt_cost(s_["cost"], compact=True),
+                _context_bar(s_.get("context_percent"), length=5),
+            )
+
+        if not sessions:
+            table.add_row("-", "No sessions", "-", "-", "-")
+
+        return Group(header, table, "[dim]Ctrl+C to stop[/]")
 
     table = Table(box=box.ROUNDED, border_style="yellow", title="[bold yellow]Sessions (most recently active first)[/]")
     table.add_column("Status", justify="center")
@@ -205,7 +326,7 @@ def render_session_breakdown_view(session_id, session_summary, subagents, mcp_ca
         title="[bold cyan]Session Breakdown[/]",
         border_style="cyan",
         box=box.DOUBLE,
-        width=92
+        width=_panel_width(92)
     )
 
     subagent_table = Table(box=box.ROUNDED, border_style="yellow", title="[bold yellow]Subagents (most recently active first)[/]")
@@ -277,7 +398,7 @@ def _build_subscription_status_renderables(status, rolling_usage=None):
             "[dim]This shows up once you've logged in to Claude Code with a claude.ai account\n"
             "(Pro/Max/Team/Enterprise). If this machine only uses an API key, there's nothing to read.[/]",
             title="[bold cyan]Claude Subscription Status[/]",
-            border_style="yellow", box=box.ROUNDED, width=90
+            border_style="yellow", box=box.ROUNDED, width=_panel_width(90)
         )]
 
     plan_label = status.get("organization_type") or status.get("subscription_type") or "unknown"
@@ -295,7 +416,7 @@ def _build_subscription_status_renderables(status, rolling_usage=None):
     renderables = [Panel(
         "\n".join(lines),
         title="[bold cyan]Claude Subscription Status[/]",
-        border_style="cyan", box=box.DOUBLE, width=90
+        border_style="cyan", box=box.DOUBLE, width=_panel_width(90)
     )]
 
     if rolling_usage:
@@ -375,7 +496,7 @@ def _build_usage_summary_renderables(data):
         title="[bold cyan]Global Claude Usage (like /usage)[/]",
         border_style="cyan",
         box=box.DOUBLE,
-        width=70
+        width=_panel_width(70)
     )
     renderables = [header]
 
@@ -533,7 +654,7 @@ def render_claude_config(mcp_servers, hooks):
             "~/.claude.json / ~/.claude/settings.json. Organization-managed policy files aren't read by this app.",
             style="dim", justify="left"
         ),
-        border_style="dim", width=95
+        border_style="dim", width=_panel_width(95)
     ), justify="center")
     console.print()
 

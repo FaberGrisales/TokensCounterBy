@@ -8,17 +8,52 @@ Las Opciones 1-4 son de solo lectura. La única excepción es la Opción 5 (Clea
 
 ---
 
+## 📋 Requisitos
+
+| | Requisito | Notas |
+|---|---|---|
+| **Sistema operativo** | Linux, macOS o Windows | Probado en Ubuntu con GNOME 46 (Wayland) |
+| **Python** | 3.8 o superior | Se valida al arrancar y aborta con un mensaje claro si es menor |
+| **`rich`** | Requerido | Única dependencia de pip. La app la instala por ti si falta |
+| **`tkinter`** | Opcional | **Solo** para la Opción 6 (ventana flotante). Todo lo demás funciona sin él |
+| **Claude Code** | Usado alguna vez en esta máquina | Sin transcripts en `~/.claude/projects` no hay nada que mostrar |
+| **Red / API keys** | **Ninguna** | La app no hace ni una sola llamada de red y no usa ninguna clave |
+
+### Sobre `tkinter` por sistema operativo
+
+`tkinter` **no es un paquete de pip** — `pip install tkinter` instala un paquete abandonado y sin relación, que no sirve. Viene con Python o se instala con el sistema:
+
+| Sistema | Situación |
+|---|---|
+| **Windows** | Ya viene con Python de python.org. Si faltara: re-ejecuta el instalador → Modify → marca `tcl/tk and IDLE` |
+| **macOS** | Ya viene con Python de python.org. Con Homebrew: `brew install python-tk` |
+| **Linux (Debian/Ubuntu)** | `sudo apt install python3-tk` |
+| **Linux (Fedora/RHEL)** | `sudo dnf install python3-tkinter` |
+| **Linux (Arch)** | `sudo pacman -S tk` |
+| **Linux (openSUSE)** | `sudo zypper install python3-tk` |
+
+No necesitas memorizar ninguno de estos: la app detecta tu gestor de paquetes y te ofrece correr el comando correcto.
+
+---
+
 ## 🚀 Instalación
 
-Asegúrate de tener Python 3.8+ instalado en tu sistema. Se recomienda crear un entorno virtual (no se versiona en git):
-
 ```bash
+git clone git@github.com:FaberGrisales/TokensCounterBy.git
+cd TokensCounterBy
+
 python3 -m venv venv
 source venv/bin/activate        # En Windows: venv\Scripts\activate
+
 pip install -r requirements.txt
 ```
 
-La única dependencia es `rich` (la interfaz de terminal). No se necesita ninguna API key.
+**Ese último paso es opcional.** Al arrancar, la app verifica sus dependencias sola:
+
+- Si falta **`rich`**, te muestra el comando exacto y te ofrece instalarlo antes de continuar.
+- Si falta **`tkinter`**, te lo avisa en el menú y te ofrece instalarlo cuando elijas la Opción 6.
+
+Nunca instala nada sin que le digas que sí, y siempre te enseña el comando antes de correrlo. En Linux, instalar `tkinter` usa el gestor de paquetes del sistema y te va a pedir tu contraseña — eso es normal y es la razón por la que se pide confirmación en vez de hacerlo en silencio.
 
 ---
 
@@ -38,7 +73,8 @@ Una vez iniciado, verás el menú principal con las siguientes opciones:
 3. **Claude Code Config (MCP & Hooks)**: Qué servidores MCP y qué hooks tienes configurados para este proyecto, inspirado en los comandos `/mcp` y `/hooks` (ver sección de abajo).
 4. **Session Breakdown**: Elegís una sesión y ves, subagente por subagente y **llamada MCP por llamada MCP**, exactamente cuántos tokens/cuánto costó cada invocación individual (ver sección de abajo).
 5. **Cleanup Inactive Sessions**: Borra permanentemente sesiones locales sin actividad hace 7+ días, con selección manual y confirmación explícita (ver sección de abajo).
-6. **Exit**: Cierra la aplicación.
+6. **Floating Monitor**: Abre una ventana pequeña que se queda **encima de las demás ventanas**, con el consumo en vivo, para verlo mientras trabajas en otra aplicación (ver sección de abajo).
+7. **Exit**: Cierra la aplicación.
 
 Los precios por modelo de Claude viven en `tokens_counter/models_config.json` (editable a mano) — de ahí sale el costo que ves en las Opciones 1 y 2.
 
@@ -139,8 +175,25 @@ Cómo funciona:
 
 ---
 
+## 📌 Floating Monitor (Opción 6)
+
+Una ventana pequeña (330×210) que se mantiene **siempre encima** del resto de ventanas, con el mismo consumo en vivo de la Opción 1: por sesión, si está activa, cuántos tokens lleva, cuánto cuesta y qué porcentaje de la ventana de contexto ocupa. Se refresca sola cada 3 segundos.
+
+La idea es dejarla en una esquina y seguir trabajando en el navegador o el editor sin perder de vista el gasto.
+
+- **Click** sobre la ventana: alterna entre "siempre encima" y ventana normal.
+- **Esc** o la X: la cierra y vuelve al menú.
+
+Funciona en Windows, macOS y Linux con el mismo código (`-topmost` de tkinter). En Linux con Wayland la ventana corre bajo XWayland, que es lo que permite que el compositor respete el "siempre encima" — probado en GNOME 46 / Ubuntu. Si tu compositor lo ignorara, la ventana sigue funcionando, solo que no se quedaría encima.
+
+Mientras la ventana está abierta, la terminal queda esperando: se cierra la ventana y vuelves al menú. Es a propósito, para que salir de la app no deje ventanas huérfanas por ahí.
+
+---
+
 ## 🧪 Tests
 
 ```bash
 python3 -m unittest tests.test_calculator
 ```
+
+Las opciones 1-4 y 6 son de solo lectura sobre los archivos locales de Claude Code. La Opción 5 es la única que borra algo.

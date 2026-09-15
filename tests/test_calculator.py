@@ -1,17 +1,22 @@
 import unittest
+import io
 import os
 import sys
 import shutil
 import tempfile
 import json
 from datetime import datetime, timedelta, timezone
+from rich.console import Console
 
 # Add package root to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tokens_counter.config import calculate_call_cost, load_config
+from tokens_counter.config import calculate_call_cost, load_config, DEFAULT_CONFIG, CONFIG_FILE
 from tokens_counter import session_monitor
 from tokens_counter import claude_config
+from tokens_counter import tui
+from tokens_counter import dependencies
+from tokens_counter import floating
 
 
 class TestTokensCalculator(unittest.TestCase):
@@ -25,6 +30,51 @@ class TestTokensCalculator(unittest.TestCase):
         # Total: $0.06
         cost = calculate_call_cost("claude-3-5-sonnet", 10000, 2000)
         self.assertAlmostEqual(cost, 0.06)
+
+    def test_every_default_model_is_fully_specified(self):
+        """Every default model needs a complete rate set and a real context window.
+
+        A missing field would silently price part of a session at $0; a missing
+        or zero context_window would make build_session_summary() report
+        context_percent as None, which is exactly the "no usage percentage"
+        symptom this config is here to prevent.
+        """
+        required = (
+            "name", "provider", "input_cost_per_1m", "output_cost_per_1m",
+            "cache_write_cost_per_1m", "cache_read_cost_per_1m",
+            "supports_caching", "context_window",
+        )
+        for model_key, cfg in DEFAULT_CONFIG.items():
+            for field in required:
+                self.assertIn(field, cfg, f"{model_key} is missing {field}")
+            self.assertGreater(cfg["context_window"], 0, f"{model_key} has no context window")
+            self.assertGreater(cfg["input_cost_per_1m"], 0, f"{model_key} has no input rate")
+            self.assertGreater(cfg["output_cost_per_1m"], 0, f"{model_key} has no output rate")
+
+    def test_models_config_on_disk_matches_defaults(self):
+        """The shipped models_config.json must agree with DEFAULT_CONFIG.
+
+        load_config()'s backfill only ADDS keys missing from disk - it never
+        corrects a key whose values are stale. So a rate fixed in
+        DEFAULT_CONFIG alone would never reach an existing install; the JSON
+        has to be updated in the same commit, and this test enforces that.
+        """
+        with open(CONFIG_FILE, encoding="utf-8") as f:
+            on_disk = json.load(f)
+        for model_key, cfg in DEFAULT_CONFIG.items():
+            self.assertIn(model_key, on_disk, f"{model_key} missing from models_config.json")
+            self.assertEqual(on_disk[model_key], cfg, f"{model_key} is stale in models_config.json")
+
+    def test_cost_calculation_opus_5(self):
+        """Opus 5 is the model these transcripts are dominated by, so price it exactly."""
+        # claude-opus-5: input $5.00/1M, output $25.00/1M, cache read $0.50/1M.
+        # 100,000 total input of which 90,000 is a cache read, 5,000 output.
+        # Standard input: (100,000 - 90,000) * 5 / 1M   = $0.05
+        # Cache read:     90,000 * 0.5 / 1M             = $0.045
+        # Output:         5,000 * 25 / 1M               = $0.125
+        # Total                                          = $0.22
+        cost = calculate_call_cost("claude-opus-5", 100000, 5000, cached_read_tokens=90000)
+        self.assertAlmostEqual(cost, 0.22)
 
     def test_cost_calculation_claude_with_cache(self):
         """Test Claude caching calculation."""
@@ -282,6 +332,20 @@ class TestSessionMonitor(unittest.TestCase):
         self.assertEqual(s["context_used_tokens"], expected_used)
         self.assertEqual(s["context_window"], expected_window)
         self.assertAlmostEqual(s["context_percent"], expected_used / expected_window * 100)
+
+    def test_get_all_sessions_context_percent_million_token_window(self):
+        """A 600K prompt on a 1M-window model is 60%, not a clamped 100%.
+
+        Regression guard: these models were previously configured with a
+        300K window, so any real long session pinned the context bar at 100%.
+        """
+        self._write_session("proj-h2", "session8b", [
+            _usage_line("claude-opus-5", 100000, 500, cache_read=400000, cache_write=100000)
+        ])
+        s = session_monitor.get_all_sessions(self.config_data)[0]
+        self.assertEqual(s["context_used_tokens"], 600000)
+        self.assertEqual(s["context_window"], 1000000)
+        self.assertAlmostEqual(s["context_percent"], 60.0)
 
     def test_get_all_sessions_context_percent_none_for_unpriced_model(self):
         self._write_session("proj-i", "session9", [_usage_line("some-unknown-future-model", 100, 50)])
@@ -574,3 +638,200 @@ class TestClaudeConfig(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestResponsiveRendering(unittest.TestCase):
+    """
+    Guards that every view stays readable in the console it's given.
+
+    The real failure mode is Rich tables, not panels: Rich never drops a
+    column on its own, it keeps all nine and ellipsizes each into slivers
+    ("claude-opu…", "$9.…"), so the view technically fits while showing
+    nothing usable. The width assertions below catch overflow; the
+    narrow-layout test is the one that catches the sliver problem, by
+    requiring the cost and the context percentage to still be readable.
+    """
+
+    def setUp(self):
+        self._real_console = tui.console
+
+    def tearDown(self):
+        tui.console = self._real_console
+
+    def _render(self, build, width):
+        """
+        Render at a fixed width and return the plain-text lines.
+
+        `build` is a callable, not a renderable: the views read console.width
+        while BUILDING (that's how _panel_width picks a panel size), so the
+        console has to be swapped in before the view is constructed. Passing
+        an already-built renderable would measure it against the real
+        terminal and quietly test nothing.
+        """
+        buf = io.StringIO()
+        tui.console = Console(width=width, file=buf, no_color=True, highlight=False)
+        tui.console.print(build())
+        return buf.getvalue().splitlines()
+
+    def _sessions(self):
+        return [
+            {
+                "session_id": "abcdef1234567890", "project": "-home-user-a-very-long-project-name",
+                "cwd": "/home/user/a-very-long-project-name", "models": ["claude-opus-5"],
+                "by_model": {}, "main_requests": 74, "subagent_requests": 3, "subagent_count": 1,
+                "input_tokens": 148, "output_tokens": 108349, "cache_read_tokens": 900000,
+                "cache_write_tokens": 1000, "cost": 9.4663,
+                "last_request": {"model": "claude-opus-5", "input_tokens": 2, "output_tokens": 524,
+                                 "cache_read_tokens": 140000, "cache_write_tokens": 9000},
+                "last_request_cost": 0.1141, "context_used_tokens": 149002,
+                "context_window": 1000000, "context_percent": 14.9,
+                "last_timestamp": None, "mtime": 0.0, "is_active": True,
+            },
+            {
+                "session_id": "99887766", "project": "proj-b", "cwd": "/home/user/b",
+                "models": ["claude-opus-4-8"], "by_model": {}, "main_requests": 833,
+                "subagent_requests": 0, "subagent_count": 0, "input_tokens": 1960,
+                "output_tokens": 931139, "cache_read_tokens": 0, "cache_write_tokens": 0,
+                "cost": None, "last_request": None, "last_request_cost": None,
+                "context_used_tokens": None, "context_window": None, "context_percent": None,
+                "last_timestamp": None, "mtime": 0.0, "is_active": False,
+            },
+        ]
+
+    def test_session_monitor_never_exceeds_console_width(self):
+        """At every width - including a tiny PiP-sized window - no line overflows."""
+        for width in (30, 40, 50, 60, 80, 100, 120):
+            lines = self._render(lambda: tui.render_session_monitor_view(self._sessions()), width)
+            longest = max((len(line.rstrip()) for line in lines), default=0)
+            self.assertLessEqual(
+                longest, width,
+                f"a line of {longest} chars overflowed a {width}-column console",
+            )
+
+    def test_session_monitor_renders_at_every_width_with_no_sessions(self):
+        for width in (30, 60, 120):
+            lines = self._render(lambda: tui.render_session_monitor_view([]), width)
+            longest = max((len(line.rstrip()) for line in lines), default=0)
+            self.assertLessEqual(longest, width)
+
+    def test_narrow_layout_keeps_the_numbers_that_matter(self):
+        """Shrinking may drop columns, but never the cost or the context bar."""
+        lines = self._render(lambda: tui.render_session_monitor_view(self._sessions()), 32)
+        text = "\n".join(lines)
+        self.assertIn("$9.47", text)     # cost survives
+        self.assertIn("15%", text)       # context percentage survives
+        self.assertIn("N/A", text)       # unpriced model still reads as N/A, not $0
+
+    def test_panel_width_caps_at_console_width(self):
+        tui.console = Console(width=40)
+        self.assertEqual(tui._panel_width(92), 40)
+        tui.console = Console(width=200)
+        self.assertEqual(tui._panel_width(92), 92)
+
+    def test_fmt_tokens_humanizes(self):
+        self.assertEqual(tui._fmt_tokens(512), "512")
+        self.assertEqual(tui._fmt_tokens(1500), "1.5K")
+        self.assertEqual(tui._fmt_tokens(1_234_567), "1.2M")
+        self.assertEqual(tui._fmt_tokens(None), "-")
+
+    def test_fmt_cost_never_renders_a_real_cost_as_free(self):
+        """A sub-cent cost must not round to $0.00 - that reads as 'this was free'."""
+        self.assertEqual(tui._fmt_cost(0.0003, compact=True), "<$0.01")
+        self.assertEqual(tui._fmt_cost(242.6267, compact=True), "$242.63")
+        self.assertEqual(tui._fmt_cost(242.6267), "$242.6267")
+        self.assertIn("N/A", tui._fmt_cost(None, compact=True))
+
+
+class TestDependencies(unittest.TestCase):
+    """
+    Startup dependency detection. These are pure functions - nothing here
+    installs anything, and no test may shell out to a package manager.
+    """
+
+    def test_never_suggests_pip_install_tkinter(self):
+        """
+        The one genuinely damaging suggestion this module could make.
+
+        `tkinter` on PyPI is an unrelated, long-dead package - installing it
+        does not provide the tkinter module and shadows nothing useful. On
+        every platform the fix is either the OS package or the Python
+        installer, never pip.
+        """
+        for dep in dependencies.check_dependencies():
+            if dep["module"] != "tkinter":
+                continue
+            command = " ".join(dep["command"] or [])
+            self.assertNotIn("pip", command)
+            self.assertNotIn("pip", (dep["manual_hint"] or ""))
+
+    def test_rich_is_required_and_tkinter_is_not(self):
+        by_module = {d["module"]: d for d in dependencies.check_dependencies()}
+        self.assertTrue(by_module["rich"]["required"])
+        self.assertFalse(by_module["tkinter"]["required"],
+                         "tkinter is only needed for the floating window; "
+                         "marking it required would block startup for everyone")
+
+    def test_every_dependency_is_fully_described(self):
+        """A dependency with neither a command nor a hint is a dead end for the user."""
+        for dep in dependencies.check_dependencies():
+            self.assertTrue(dep["command"] or dep["manual_hint"],
+                            f"{dep['module']} offers no way forward")
+            self.assertTrue(dependencies.describe(dep).strip())
+
+    def test_linux_tk_command_follows_the_available_package_manager(self):
+        real_which = dependencies.shutil.which
+        try:
+            dependencies.shutil.which = lambda b: "/usr/bin/dnf" if b == "dnf" else None
+            self.assertEqual(dependencies._linux_tk_command(),
+                             ["sudo", "dnf", "install", "-y", "python3-tkinter"])
+            dependencies.shutil.which = lambda b: "/usr/bin/apt-get" if b == "apt-get" else None
+            self.assertEqual(dependencies._linux_tk_command(),
+                             ["sudo", "apt-get", "install", "-y", "python3-tk"])
+            dependencies.shutil.which = lambda b: None
+            self.assertIsNone(dependencies._linux_tk_command())
+        finally:
+            dependencies.shutil.which = real_which
+
+    def test_windows_tkinter_has_no_command_but_explains_itself(self):
+        """tkinter can't be installed from a script on Windows - say so, don't run something."""
+        real_platform = dependencies.sys.platform
+        try:
+            dependencies.sys.platform = "win32"
+            command, hint = dependencies._tkinter_requirement()
+            self.assertIsNone(command)
+            self.assertIn("tcl/tk", hint)
+        finally:
+            dependencies.sys.platform = real_platform
+
+    def test_install_without_a_command_reports_the_hint_instead_of_running(self):
+        dep = {"command": None, "manual_hint": "install it yourself", "module": "x", "label": "x"}
+        ok, message = dependencies.install(dep)
+        self.assertFalse(ok)
+        self.assertEqual(message, "install it yourself")
+
+    def test_missing_required_only_filters_optional(self):
+        for dep in dependencies.missing(required_only=True):
+            self.assertTrue(dep["required"])
+
+    def test_check_python_version_passes_on_this_interpreter(self):
+        self.assertIsNone(dependencies.check_python_version())
+
+
+class TestFloatingWindowFormatting(unittest.TestCase):
+    """The floating window's own formatting helpers - no window is opened."""
+
+    def test_fmt_tokens_matches_the_tui(self):
+        """Both layers show the same numbers; drifting formats would confuse."""
+        for n in (0, 512, 1500, 1_234_567):
+            self.assertEqual(floating._fmt_tokens(n), tui._fmt_tokens(n))
+
+    def test_fmt_cost_never_renders_a_real_cost_as_free(self):
+        self.assertEqual(floating._fmt_cost(0.0004), "<$0.01")
+        self.assertEqual(floating._fmt_cost(242.6267), "$242.63")
+        self.assertEqual(floating._fmt_cost(None), "N/A")
+
+    def test_context_color_thresholds_match_the_tui_bar(self):
+        self.assertEqual(floating._context_color(None), floating.DIM)
+        self.assertEqual(floating._context_color(10), floating.LIVE)     # green
+        self.assertEqual(floating._context_color(65), floating.ACCENT)   # yellow
+        self.assertNotIn(floating._context_color(95), (floating.LIVE, floating.ACCENT))

@@ -8,11 +8,20 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from tokens_counter.config import load_config
 from tokens_counter import session_monitor
 from tokens_counter import claude_config
+from tokens_counter import dependencies
+from tokens_counter import floating
 import tokens_counter.tui as tui
 
 def main():
     # Load configuration
     config_data = load_config()
+
+    # Required dependencies were already settled by start.py's bootstrap
+    # check. What's left are the optional ones (tkinter, for Option 6):
+    # report them once instead of letting the user discover the gap only
+    # after picking the menu option that needs them.
+    optional_missing = [d for d in dependencies.missing() if not d["required"]]
+    notice_shown = False
 
     while True:
         tui.render_header()
@@ -24,10 +33,19 @@ def main():
             "3": "Claude Code Config (MCP & Hooks 🔧)",
             "4": "Session Breakdown (subagents + MCP calls 🧩)",
             "5": "Cleanup Inactive Sessions (delete 🗑️)",
-            "6": "Exit 🚪"
+            "6": "Floating Monitor (always on top 📌)",
+            "7": "Exit 🚪"
         }
 
         tui.render_menu(menu_options)
+
+        if optional_missing and not notice_shown:
+            for dep in optional_missing:
+                tui.console.print(
+                    f"[dim]Option 6 needs {dep['label']}, which isn't installed. "
+                    f"Pick it and the app will offer to install it.[/]"
+                )
+            notice_shown = True
 
         choice = Prompt.ask("\nEnter selection", choices=list(menu_options.keys()), default="1")
 
@@ -194,6 +212,48 @@ def main():
             input("\nPress Enter to return...")
 
         elif choice == "6":
+            # Floating always-on-top window. It's the same data as Option 1,
+            # in a small window that stays above other windows - the point is
+            # watching usage while working in another app, so it lives in a
+            # real OS window rather than the terminal.
+            tui.clear_screen()
+            tui.console.print("[bold green]=== FLOATING MONITOR (always on top) ===[/]\n")
+
+            if not floating.is_available():
+                dep = next((d for d in dependencies.check_dependencies()
+                            if d["module"] == "tkinter"), None)
+                tui.console.print("[yellow]This option needs tkinter, which isn't installed.[/]")
+                tui.console.print(f"[dim]{dependencies.describe(dep)}[/]\n")
+
+                if dep and dep["command"]:
+                    tui.console.print(
+                        "[dim]This runs a system package manager and will ask for your "
+                        "password.[/]"
+                    )
+                    answer = Prompt.ask("Install it now?", choices=["y", "n"], default="y")
+                    if answer != "y":
+                        tui.console.print("[yellow]Nothing installed.[/]")
+                        input("\nPress Enter to return...")
+                        continue
+
+                    tui.console.print("\n[dim]Installing...[/]\n")
+                    ok, message = dependencies.install(dep)
+                    tui.console.print(f"[{'green' if ok else 'red'}]{message}[/]")
+                    if not ok:
+                        input("\nPress Enter to return...")
+                        continue
+                    optional_missing = [d for d in dependencies.missing() if not d["required"]]
+                else:
+                    input("\nPress Enter to return...")
+                    continue
+
+            tui.console.print("[dim]Opening the window. Close it to return to the menu.[/]")
+            ok, error = floating.run_floating_monitor(config_data)
+            if not ok:
+                tui.console.print(f"[bold red]Could not open the window:[/] {error}")
+                input("\nPress Enter to return...")
+
+        elif choice == "7":
             tui.clear_screen()
             tui.console.print("\n[bold cyan]Exiting Token Monitor. Goodbye![/]")
             break
