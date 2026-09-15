@@ -67,33 +67,58 @@ def _context_color(percent):
     return "#f87171"
 
 
-def _time_until(iso_timestamp):
+def _to_datetime(value):
     """
-    Compact time left until an ISO-8601 instant, e.g. '10m', '2h', '3d'.
+    Parse a `resets_at` from Claude into a timezone-aware datetime.
 
-    Returns None for a missing or unparseable value, and "now" once the
-    moment has passed - the reset has happened but the capture that would
-    prove it hasn't been taken yet, so claiming a negative countdown would
-    be worse than saying it's due.
+    Claude Code sends it as an integer Unix timestamp in SECONDS (the schema
+    in the binary is `resetsAt: v().int()`), not the ISO string the rest of
+    this app's timestamps use. Both are accepted: the ISO branch keeps
+    fixtures and any future format change working, and a value large enough
+    to be milliseconds is rescaled rather than landing tens of thousands of
+    years in the future. Returns None for anything unparseable.
     """
-    if not isinstance(iso_timestamp, str) or not iso_timestamp:
-        return None
     from datetime import datetime, timezone
-    try:
-        text = iso_timestamp[:-1] + "+00:00" if iso_timestamp.endswith("Z") else iso_timestamp
-        when = datetime.fromisoformat(text)
-        if when.tzinfo is None:
-            when = when.replace(tzinfo=timezone.utc)
-    except ValueError:
+
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        seconds = float(value)
+        if seconds > 1e11:          # milliseconds, not seconds
+            seconds /= 1000.0
+        try:
+            return datetime.fromtimestamp(seconds, timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return None
+    if isinstance(value, str) and value:
+        try:
+            text = value[:-1] + "+00:00" if value.endswith("Z") else value
+            parsed = datetime.fromisoformat(text)
+            return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed
+        except ValueError:
+            return None
+    return None
+
+
+def _time_until(resets_at):
+    """
+    Compact time left until `resets_at`, e.g. '10m', '2h', '3d'.
+
+    Rounds UP: flooring shows "8m" the instant 9 minutes remain, and would
+    render a live window as "0m" for its last 59 seconds. Returns "now" once
+    the moment has passed - the reset happened but no capture proves it yet,
+    and a negative countdown would be worse than saying it's due.
+    """
+    import math
+    from datetime import datetime, timezone
+
+    when = _to_datetime(resets_at)
+    if when is None:
         return None
 
     seconds = (when - datetime.now(timezone.utc)).total_seconds()
     if seconds <= 0:
         return "now"
-    # Round UP, not down. A countdown that floors shows "8m" the instant
-    # 9 minutes remain, and "1h" with 1h59m to go - and it would render a
-    # live window as "0m" for the last 59 seconds.
-    import math
     if seconds < 3600:
         return f"{math.ceil(seconds / 60)}m"
     if seconds < 86400:

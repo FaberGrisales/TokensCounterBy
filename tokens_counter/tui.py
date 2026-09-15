@@ -202,16 +202,15 @@ def _format_duration(seconds):
     return f"{secs}s"
 
 def _parse_iso(value):
-    """Parse an ISO-8601 string (Claude's `resets_at`) to a datetime, or None."""
-    if not isinstance(value, str) or not value:
-        return None
-    try:
-        from datetime import datetime, timezone
-        text = value[:-1] + "+00:00" if value.endswith("Z") else value
-        parsed = datetime.fromisoformat(text)
-        return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed
-    except ValueError:
-        return None
+    """
+    Parse a timestamp from Claude (`resets_at`) to a datetime, or None.
+
+    Delegates to floating._to_datetime so the two presentation layers cannot
+    disagree about a format - Claude sends an integer Unix timestamp here,
+    not the ISO strings used elsewhere in the app.
+    """
+    from tokens_counter.floating import _to_datetime
+    return _to_datetime(value)
 
 
 def _format_local_time(dt):

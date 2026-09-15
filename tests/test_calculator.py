@@ -1171,6 +1171,34 @@ class TestFloatingPlanHeadline(unittest.TestCase):
         self.assertNotIn("5h:2h", text)
         self.assertNotIn("left", text)
 
+    def test_countdown_accepts_the_unix_integer_claude_actually_sends(self):
+        """
+        Claude Code sends resets_at as an integer Unix timestamp in seconds
+        (`resetsAt: v().int()` in its schema), not an ISO string. Parsing only
+        strings silently dropped the countdown from a working install.
+        """
+        from datetime import datetime, timezone
+        epoch = int((datetime.now(timezone.utc) + timedelta(hours=2)).timestamp())
+        self.assertEqual(floating._time_until(epoch), "2h")
+
+    def test_countdown_accepts_iso_strings_too(self):
+        iso = (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat()
+        self.assertEqual(floating._time_until(iso), "30m")
+
+    def test_countdown_rescales_a_millisecond_timestamp(self):
+        """A ms value read as seconds lands tens of thousands of years out."""
+        from datetime import datetime, timezone
+        epoch_ms = int((datetime.now(timezone.utc) + timedelta(hours=2)).timestamp() * 1000)
+        self.assertEqual(floating._time_until(epoch_ms), "2h")
+
+    def test_both_layers_parse_the_same_timestamp(self):
+        """The table and the widget must not disagree about the format."""
+        from datetime import datetime, timezone
+        epoch = int((datetime.now(timezone.utc) + timedelta(hours=1)).timestamp())
+        self.assertIsNotNone(tui._parse_iso(epoch))
+        self.assertIsNotNone(floating._to_datetime(epoch))
+        self.assertEqual(tui._parse_iso(epoch), floating._to_datetime(epoch))
+
     def test_countdown_says_now_rather_than_going_negative(self):
         past = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
         self.assertEqual(floating._time_until(past), "now")
