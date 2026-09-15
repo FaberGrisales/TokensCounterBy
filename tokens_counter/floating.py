@@ -102,12 +102,16 @@ def _to_datetime(value):
 
 def _time_until(resets_at):
     """
-    Compact time left until `resets_at`, e.g. '10m', '2h', '3d'.
+    Compact time left until `resets_at`: '45m', '1h20m', '6d18h'.
 
-    Rounds UP: flooring shows "8m" the instant 9 minutes remain, and would
-    render a live window as "0m" for its last 59 seconds. Returns "now" once
-    the moment has passed - the reset happened but no capture proves it yet,
-    and a negative countdown would be worse than saying it's due.
+    Precision matters more than brevity here. Rounding a duration up to whole
+    hours turns 1h18m into "2h" - a 40-minute overstatement of how long you
+    have left, which is the opposite of useful when you're watching a limit.
+    So the hour and day ranges carry their remainder, and only the sub-hour
+    range rounds (up, so a live window never reads "0m" for its last minute).
+
+    Returns "now" once the moment has passed: the reset happened but no
+    capture proves it yet, and a negative countdown would be worse.
     """
     import math
     from datetime import datetime, timezone
@@ -119,11 +123,23 @@ def _time_until(resets_at):
     seconds = (when - datetime.now(timezone.utc)).total_seconds()
     if seconds <= 0:
         return "now"
-    if seconds < 3600:
-        return f"{math.ceil(seconds / 60)}m"
-    if seconds < 86400:
-        return f"{math.ceil(seconds / 3600)}h"
-    return f"{math.ceil(seconds / 86400)}d"
+
+    # One rounding rule for every scale: ceil to the next whole minute, then
+    # format. Ceil because a countdown should never read "0m" while time
+    # remains, and at minute granularity throughout because the alternatives
+    # both misreport - rounding up to whole HOURS turns 1h18m into "2h" (40
+    # minutes of overstatement), while truncating turns a 1h59m59s remainder
+    # into "1h59m" when "2h" is what anyone would say.
+    total_minutes = math.ceil(seconds / 60)
+    if total_minutes < 60:
+        return f"{total_minutes}m"
+
+    hours, minutes = divmod(total_minutes, 60)
+    if hours < 24:
+        return f"{hours}h{minutes:02d}m" if minutes else f"{hours}h"
+
+    days, hours = divmod(hours, 24)
+    return f"{days}d{hours}h" if hours else f"{days}d"
 
 
 def _plan_headline(config_data):

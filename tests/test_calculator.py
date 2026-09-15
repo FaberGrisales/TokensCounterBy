@@ -1181,6 +1181,23 @@ class TestFloatingPlanHeadline(unittest.TestCase):
         epoch = int((datetime.now(timezone.utc) + timedelta(hours=2)).timestamp())
         self.assertEqual(floating._time_until(epoch), "2h")
 
+    def test_countdown_keeps_the_minutes_within_an_hour_scale(self):
+        """
+        Rounding 1h18m up to "2h" overstates the time left by 40 minutes -
+        precisely wrong when the number exists to tell you how long you have.
+        """
+        from datetime import datetime, timezone
+        epoch = int((datetime.now(timezone.utc) + timedelta(hours=1, minutes=18)).timestamp())
+        self.assertEqual(floating._time_until(epoch), "1h18m")
+
+    def test_countdown_does_not_truncate_an_exact_duration(self):
+        """An exact 2h delta measures as 7199.99s; truncating shows "1h59m"."""
+        from datetime import datetime, timezone
+        epoch = int((datetime.now(timezone.utc) + timedelta(hours=2)).timestamp())
+        self.assertEqual(floating._time_until(epoch), "2h")
+        epoch = int((datetime.now(timezone.utc) + timedelta(days=6, hours=18)).timestamp())
+        self.assertEqual(floating._time_until(epoch), "6d18h")
+
     def test_countdown_accepts_iso_strings_too(self):
         iso = (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat()
         self.assertEqual(floating._time_until(iso), "30m")
