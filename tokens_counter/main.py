@@ -34,7 +34,8 @@ def main():
             "4": "Session Breakdown (subagents + MCP calls 🧩)",
             "5": "Cleanup Inactive Sessions (delete 🗑️)",
             "6": "Floating Monitor (always on top 📌)",
-            "7": "Exit 🚪"
+            "7": "Enable Real Plan Limits (status line 📶)",
+            "8": "Exit 🚪"
         }
 
         tui.render_menu(menu_options)
@@ -254,6 +255,93 @@ def main():
                 input("\nPress Enter to return...")
 
         elif choice == "7":
+            # Installs a Claude Code status line script that captures the REAL
+            # 5h/7d plan-limit percentages. Those are computed server-side and
+            # aren't cached to disk anywhere this app can read - but Claude
+            # Code hands them to status line scripts, so this is the only way
+            # to show them without the app making a network call itself.
+            tui.clear_screen()
+            tui.console.print("[bold green]=== ENABLE REAL PLAN LIMITS ===[/]\n")
+
+            report = claude_config.statusline_status_report()
+            installed, current = report["ours"], report["command"]
+            limits = claude_config.get_plan_rate_limits()
+
+            if installed and report["problems"]:
+                # The whole point: a broken command fails silently inside
+                # Claude Code, so the app has to say so out loud.
+                tui.console.print("[bold red]Installed, but it cannot run:[/]")
+                for problem in report["problems"]:
+                    tui.console.print(f"  [red]•[/] {problem}")
+                tui.console.print(f"\n[dim]current: {current}[/]")
+                tui.console.print(f"[dim]fixed:   {claude_config.statusline_command()}[/]\n")
+                if Prompt.ask("Repair it?", choices=["y", "n"], default="y") == "y":
+                    ok, message = claude_config.install_statusline()
+                    tui.console.print(f"[{'green' if ok else 'red'}]{message}[/]")
+                    if ok:
+                        tui.console.print(
+                            "[dim]Restart Claude Code for it to pick up the change.[/]"
+                        )
+                else:
+                    tui.console.print("[yellow]Nothing changed.[/]")
+                input("\nPress Enter to return...")
+                continue
+
+            if installed:
+                tui.console.print("[green]Already installed.[/]")
+                if limits and (limits.get("five_hour") or limits.get("seven_day")):
+                    tui.console.print("[dim]Real plan limits are showing in Option 2.[/]")
+                elif limits and limits.get("available") is False:
+                    tui.console.print(
+                        "[yellow]Claude Code reports that plan limits don't apply to this "
+                        "account (API key, Bedrock, Vertex, or a profile without the scope), "
+                        "so there is no percentage to show.[/]"
+                    )
+                else:
+                    tui.console.print(
+                        "[dim]No reading captured yet - it fills in the next time a Claude "
+                        "Code session draws its status line.[/]"
+                    )
+                input("\nPress Enter to return...")
+                continue
+
+            tui.console.print(
+                "Claude Code passes the real 5h/7d plan-limit percentages to status line\n"
+                "scripts. This installs a small script that saves them so Option 2 can\n"
+                "show them. The app still makes no network calls - Claude Code does.\n"
+            )
+            tui.console.print("[bold]This writes to your Claude Code settings:[/]")
+            tui.console.print(f"  [dim]{claude_config.get_claude_config_dir() / 'settings.json'}[/]")
+            tui.console.print(f"  [dim]statusLine.command = {claude_config.statusline_command()}[/]\n")
+            tui.console.print(
+                "[yellow]It will also change how your Claude Code status line looks: it shows\n"
+                "the model plus '5h N% · 7d N%'.[/]\n"
+            )
+
+            if current:
+                tui.console.print(
+                    f"[bold red]You already have a different status line configured:[/]\n"
+                    f"  [dim]{current}[/]\n"
+                    "[yellow]Installing would replace it. Cancel and merge them by hand if you "
+                    "want to keep it.[/]\n"
+                )
+
+            answer = Prompt.ask("Install it?", choices=["y", "n"], default="n" if current else "y")
+            if answer != "y":
+                tui.console.print("[yellow]Nothing changed.[/]")
+                input("\nPress Enter to return...")
+                continue
+
+            ok, message = claude_config.install_statusline()
+            tui.console.print(f"[{'green' if ok else 'red'}]{message}[/]")
+            if ok:
+                tui.console.print(
+                    "[dim]Start or continue a Claude Code session to capture the first "
+                    "reading, then open Option 2.[/]"
+                )
+            input("\nPress Enter to return...")
+
+        elif choice == "8":
             tui.clear_screen()
             tui.console.print("\n[bold cyan]Exiting Token Monitor. Goodbye![/]")
             break

@@ -3,3 +3,4 @@ __pycache__/
 .env
 venv/
 .venv/
+tokens_counter/rate_limits_cache.json

@@ -74,7 +74,8 @@ Una vez iniciado, verás el menú principal con las siguientes opciones:
 4. **Session Breakdown**: Elegís una sesión y ves, subagente por subagente y **llamada MCP por llamada MCP**, exactamente cuántos tokens/cuánto costó cada invocación individual (ver sección de abajo).
 5. **Cleanup Inactive Sessions**: Borra permanentemente sesiones locales sin actividad hace 7+ días, con selección manual y confirmación explícita (ver sección de abajo).
 6. **Floating Monitor**: Abre una ventana pequeña que se queda **encima de las demás ventanas**, con el consumo en vivo, para verlo mientras trabajas en otra aplicación (ver sección de abajo).
-7. **Exit**: Cierra la aplicación.
+7. **Enable Real Plan Limits**: Activa la captura de tus porcentajes reales de límite de plan (5h y 7 días) desde Claude Code (ver sección de abajo).
+8. **Exit**: Cierra la aplicación.
 
 Los precios por modelo de Claude viven en `tokens_counter/models_config.json` (editable a mano) — de ahí sale el costo que ves en las Opciones 1 y 2.
 
@@ -123,6 +124,28 @@ Contenido:
 **Cómo calculo "Time-in-Window %"**: la primera versión intentaba adivinar "cuándo empezó tu sesión" buscando huecos de inactividad — engañoso, porque cualquier pausa de 5+ horas hacía que pareciera "recién empezada". Una segunda versión anclaba a tu petición **más reciente** y hacía una cuenta regresiva hasta que esa petición saliera de la ventana — matemáticamente correcto, pero como cada mensaje nuevo empuja ese momento hacia adelante, mientras estás trabajando activamente la cuenta regresiva nunca bajaba (parecía congelada). Esta versión ancla a tu petición **más antigua que sigue dentro de la ventana** y mide cuánto tiempo lleva ahí — así el tiempo/porcentaje crece de forma continua con tu uso real, sin reiniciarse en cada mensaje.
 
 **Limitación honesta:** esta opción **no** puede mostrar el porcentaje exacto de tu límite de plan usado ni la hora exacta de reinicio que calcula Anthropic en su servidor contra una cuota por tier que no es pública. Investigué a fondo (`~/.claude.json`, `~/.claude/.credentials.json`, `~/.claude/policy-limits.json`) y confirmé que ese % y esa cuota no quedan cacheados en ningún archivo local. "Time-in-Window %" es lo más cercano y honesto que puedo calcular con datos 100% locales; solo el comando real `/usage` dentro de Claude Code puede mostrarte el % y reinicio autoritativos de tu plan.
+
+### Tu propio presupuesto (columna "vs Your Budget")
+
+La app **no puede** mostrarte el porcentaje de límite de tu plan: ese número se calcula en el servidor de Anthropic contra una cuota por tier que no está documentada y que no está guardada en ningún archivo local (se verificó `~/.claude.json`, `.credentials.json` y `policy-limits.json`). Inventar un denominador daría un número creíble y falso.
+
+Lo que sí puede hacer es compararte contra **un límite que tú definas**. Edita `tokens_counter/budget_config.json`:
+
+```json
+{
+    "5h": { "tokens": 40000000, "cost_usd": null },
+    "7d": { "tokens": null,     "cost_usd": 200 }
+}
+```
+
+- `tokens` cuenta entrada + salida + lectura de caché + escritura de caché.
+- `cost_usd` es en dólares, con las tarifas de `models_config.json`.
+- Si defines los dos en una ventana, manda `tokens`.
+- Deja `null` (o borra el archivo) y la columna simplemente no aparece.
+
+La barra se pone verde por debajo del 50%, amarilla hasta 80% y roja por encima — y **no se detiene en 100%**: pasarte de tu propio presupuesto es justo lo que quieres ver.
+
+Los cambios al archivo se recogen en el siguiente refresco, sin reiniciar la app.
 
 ---
 
@@ -187,6 +210,39 @@ La idea es dejarla en una esquina y seguir trabajando en el navegador o el edito
 Funciona en Windows, macOS y Linux con el mismo código (`-topmost` de tkinter). En Linux con Wayland la ventana corre bajo XWayland, que es lo que permite que el compositor respete el "siempre encima" — probado en GNOME 46 / Ubuntu. Si tu compositor lo ignorara, la ventana sigue funcionando, solo que no se quedaría encima.
 
 Mientras la ventana está abierta, la terminal queda esperando: se cierra la ventana y vuelves al menú. Es a propósito, para que salir de la app no deje ventanas huérfanas por ahí.
+
+---
+
+## 📶 Real Plan Limits (Opción 7)
+
+Los porcentajes reales de tu plan (las barras de 5h y 7 días que ves en `/usage`) **se calculan en el servidor de Anthropic** y no están guardados en ningún archivo local. Esta app no hace llamadas de red, así que no puede pedirlos.
+
+Pero Claude Code sí los tiene, y desde la v2.1.80 se los pasa a los scripts de *status line*. Esta opción instala un script pequeño que los guarda, y la app lee ese archivo:
+
+```
+Claude Code ──(JSON con rate_limits)──> statusline.py ──> cache
+                                                            │
+                                      TokensCounterBy <─────┘
+```
+
+**La app sigue sin hacer ni una llamada de red** — las hace Claude Code.
+
+Qué hace la opción:
+
+1. Te muestra el comando exacto que va a escribir en `~/.claude/settings.json`.
+2. Te avisa de que tu status line de Claude Code cambiará de aspecto (pasará a mostrar `Opus 5 · 5h 12% · 7d 8%`).
+3. Si ya tienes otro status line configurado, te lo dice y te deja cancelar.
+4. Hace una copia de seguridad (`settings.json.bak-tokenscounter`) y conserva el resto de tus ajustes.
+
+Después de instalarlo hay que **reiniciar Claude Code**: lee `settings.json` al arrancar.
+
+**Limitaciones honestas:**
+
+- **No hay "tokens restantes".** Claude entrega solo `used_percentage` y `resets_at`. No existe ningún campo con cantidades absolutas de tokens, así que ese número no se puede mostrar.
+- **El dato puede estar viejo.** El cache solo se refresca mientras una sesión de Claude Code dibuja su status line. La app muestra hace cuánto se capturó, y el widget marca con `?` una lectura de más de 5 minutos.
+- **No aplica a todo el mundo.** Con API key, Bedrock o Vertex, Claude Code informa `rate_limits_available: false` y no hay porcentaje que mostrar. La app lo dice en vez de inventar uno.
+
+Si algo no funciona, vuelve a entrar a la Opción 7: diagnostica la instalación (ruta con espacios sin comillas, venv borrado, repo movido) y te ofrece repararla.
 
 ---
 

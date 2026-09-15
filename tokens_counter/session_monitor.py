@@ -6,7 +6,7 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from tokens_counter.config import calculate_call_cost
+from tokens_counter.config import calculate_call_cost, load_budget
 
 # Claude Code stores one JSONL transcript per session under
 # <config_dir>/projects/<project>/<session-id>.jsonl, plus (when the session
@@ -633,10 +633,21 @@ def get_rolling_window_usage(config_data, now=None):
     result = {}
     for key, w in windows.items():
         elapsed_seconds = percent_used = None
+        window_end_at = remaining_seconds = None
         if w["window_start_at"] is not None:
             duration_seconds = w["duration"].total_seconds()
             elapsed_seconds = min(duration_seconds, max(0.0, (now - w["window_start_at"]).total_seconds()))
             percent_used = min(100.0, (elapsed_seconds / duration_seconds) * 100)
+
+            # When the oldest request still inside the window ages out of it.
+            # This is an exact, computable moment - window_start_at is a real
+            # timestamp from a transcript and the duration is fixed - unlike a
+            # plan-quota reset time, which is server-side and unknowable here.
+            # It is NOT "when your limit resets": after this instant the
+            # window simply re-anchors to whatever request is then oldest, so
+            # the end time jumps forward rather than the counter zeroing.
+            window_end_at = w["window_start_at"] + w["duration"]
+            remaining_seconds = max(0.0, (window_end_at - now).total_seconds())
 
         result[key] = {
             "input": w["input"],
@@ -646,13 +657,57 @@ def get_rolling_window_usage(config_data, now=None):
             "requests": w["requests"],
             "cost": w["cost"] if w["any_priced"] else None,
             "window_start_at": w["window_start_at"],
+            "window_end_at": window_end_at,
+            "remaining_seconds": remaining_seconds,
             "elapsed_seconds": elapsed_seconds,
             "percent_used": percent_used
         }
     return result
 
 
-def watch_sessions(config_data, refresh_seconds=3):
+def apply_budgets(rolling_usage, budget):
+    """
+    Annotate each rolling window with usage against the user's own budget.
+
+    This is the ONLY honest percentage-of-consumption this app can show. The
+    plan-quota percentage `/usage` displays is computed server-side against an
+    undocumented per-tier allowance that is not cached to disk anywhere
+    readable (see get_rolling_window_usage), so the denominator here has to
+    come from the user. Windows with no budget set get None throughout rather
+    than a guessed limit - an invented denominator produces a believable,
+    wrong number, which is worse than no number.
+
+    Adds per window: `total_tokens` (always, budget or not),
+    `budget_tokens`/`budget_tokens_percent` and
+    `budget_cost`/`budget_cost_percent`. Percentages are NOT clamped at 100 -
+    going over your own budget is exactly what you'd want to see.
+    """
+    budget = budget or {}
+    for key, window in rolling_usage.items():
+        total_tokens = (
+            window.get("input", 0) + window.get("output", 0)
+            + window.get("cache_read", 0) + window.get("cache_write", 0)
+        )
+        window["total_tokens"] = total_tokens
+
+        limits = budget.get(key) or {}
+        token_limit = limits.get("tokens")
+        cost_limit = limits.get("cost_usd")
+
+        window["budget_tokens"] = token_limit
+        window["budget_tokens_percent"] = (
+            (total_tokens / token_limit) * 100 if token_limit else None
+        )
+
+        cost = window.get("cost")
+        window["budget_cost"] = cost_limit
+        window["budget_cost_percent"] = (
+            (cost / cost_limit) * 100 if cost_limit and cost is not None else None
+        )
+    return rolling_usage
+
+
+def watch_sessions(config_data, refresh_seconds=2):
     """Render a live-updating view of all local sessions until interrupted (Ctrl+C)."""
     from rich.live import Live
     from tokens_counter.tui import console, render_session_monitor_view
@@ -682,14 +737,20 @@ def watch_global_usage(config_data, refresh_seconds=5):
     from rich.live import Live
     # Imported lazily (not at module load) to avoid a circular import, since
     # claude_config.py itself imports get_claude_config_dir from this module.
-    from tokens_counter.claude_config import get_subscription_status
+    from tokens_counter.claude_config import get_subscription_status, get_plan_rate_limits
     from tokens_counter.tui import console, render_global_usage_live_view
 
     def snapshot():
         status = get_subscription_status()
-        rolling_usage = get_rolling_window_usage(config_data)
+        # Re-read the budget each tick (not once outside the loop) so editing
+        # budget_config.json shows up within one refresh instead of needing
+        # the app restarted.
+        rolling_usage = apply_budgets(get_rolling_window_usage(config_data), load_budget())
         usage_data = get_global_usage_summary(config_data)
-        return render_global_usage_live_view(status, rolling_usage, usage_data)
+        # Re-read each tick too: the status line rewrites this cache whenever a
+        # Claude Code session renders, so the real plan % updates live.
+        plan_limits = get_plan_rate_limits()
+        return render_global_usage_live_view(status, rolling_usage, usage_data, plan_limits)
 
     with Live(snapshot(), console=console, refresh_per_second=1) as live:
         while True:

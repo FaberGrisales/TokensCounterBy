@@ -23,6 +23,11 @@ import os
 
 REFRESH_MS = 3000
 
+# A plan-limit reading older than this is flagged rather than shown as
+# current: the status line only rewrites its cache while a Claude Code
+# session is rendering, so an idle machine's number ages silently.
+STALE_AFTER_SECONDS = 300
+
 # Dark, low-contrast palette: this window sits on top of whatever the user is
 # actually working on, so it should read at a glance without pulling focus.
 BG = "#11131a"
@@ -62,6 +67,105 @@ def _context_color(percent):
     return "#f87171"
 
 
+def _time_until(iso_timestamp):
+    """
+    Compact time left until an ISO-8601 instant, e.g. '10m', '2h', '3d'.
+
+    Returns None for a missing or unparseable value, and "now" once the
+    moment has passed - the reset has happened but the capture that would
+    prove it hasn't been taken yet, so claiming a negative countdown would
+    be worse than saying it's due.
+    """
+    if not isinstance(iso_timestamp, str) or not iso_timestamp:
+        return None
+    from datetime import datetime, timezone
+    try:
+        text = iso_timestamp[:-1] + "+00:00" if iso_timestamp.endswith("Z") else iso_timestamp
+        when = datetime.fromisoformat(text)
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+    seconds = (when - datetime.now(timezone.utc)).total_seconds()
+    if seconds <= 0:
+        return "now"
+    # Round UP, not down. A countdown that floors shows "8m" the instant
+    # 9 minutes remain, and "1h" with 1h59m to go - and it would render a
+    # live window as "0m" for the last 59 seconds.
+    import math
+    if seconds < 3600:
+        return f"{math.ceil(seconds / 60)}m"
+    if seconds < 86400:
+        return f"{math.ceil(seconds / 3600)}h"
+    return f"{math.ceil(seconds / 86400)}d"
+
+
+def _plan_headline(config_data):
+    """
+    What to show beside the live/idle counts: Claude's real 5h plan-limit
+    percentage when it's available, else a fallback.
+
+    Order is deliberate. The real number is the point, but it only exists when
+    the status line capture is installed AND the account actually has plan
+    limits (not API key / Bedrock / Vertex), so the widget degrades instead of
+    going blank:
+
+      1. real 5h plan % from Claude  ->  "5h 43%"
+      2. the user's own 5h budget    ->  "5h 64%" (their denominator)
+      3. neither                     ->  total spend, as before
+
+    A stale capture is marked with a trailing "?" rather than shown as
+    current - the cache only refreshes while a Claude Code session renders its
+    status line.
+
+    Returns (text, colour).
+    """
+    from tokens_counter import claude_config
+
+    try:
+        limits = claude_config.get_plan_rate_limits()
+    except Exception:
+        limits = None
+
+    five_hour = (limits or {}).get("five_hour")
+    if five_hour:
+        percent = five_hour["used_percentage"]
+        age = (limits or {}).get("age_seconds")
+        stale = "?" if age is not None and age > STALE_AFTER_SECONDS else ""
+        # "5h 43% · resets 9m", not "5h:9m · 43%": juxtaposing the window name
+        # with a duration reads as nonsense the moment the countdown is also
+        # in hours ("5h:2h"), and a bare "9m left" beside a percentage reads
+        # as remaining quota rather than time.
+        left = _time_until(five_hour.get("resets_at"))
+        label = f"5h {percent:.0f}%{stale}"
+        if left:
+            label += f" · resets {left}"
+        return label, _context_color(percent)
+
+    from tokens_counter.config import load_budget
+    from tokens_counter import session_monitor
+
+    try:
+        windows = session_monitor.apply_budgets(
+            session_monitor.get_rolling_window_usage(config_data), load_budget()
+        )
+        budget_percent = windows.get("5h", {}).get("budget_tokens_percent")
+        if budget_percent is None:
+            budget_percent = windows.get("5h", {}).get("budget_cost_percent")
+        if budget_percent is not None:
+            return f"5h · {budget_percent:.0f}%", _context_color(budget_percent)
+    except Exception:
+        pass
+
+    try:
+        total = sum(s["cost"] for s in session_monitor.get_all_sessions(config_data)
+                    if s["cost"] is not None)
+        return _fmt_cost(total), ACCENT
+    except Exception:
+        return "", DIM
+
+
 def is_available():
     """True if tkinter can be imported on this machine."""
     try:
@@ -97,12 +201,23 @@ def run_floating_monitor(config_data, max_rows=5):
 
     root.title("Tokens")
     root.configure(bg=BG)
-    root.geometry("330x210+80+80")
+    root.geometry("400x210+80+80")
     root.minsize(240, 120)
     root.attributes("-topmost", True)
 
-    header = tk.Label(root, bg=BG, fg=ACCENT, font=("sans", 9, "bold"), anchor="w")
-    header.pack(fill="x", padx=10, pady=(8, 0))
+    header_frame = tk.Frame(root, bg=BG)
+    header_frame.pack(fill="x", padx=10, pady=(8, 0))
+    header = tk.Label(header_frame, bg=BG, fg=ACCENT, font=("sans", 9, "bold"), anchor="w")
+    header.pack(side="left")
+    # Separate label so the plan percentage can be green/yellow/red on its own
+    # without recolouring the live/idle counts next to it.
+    plan_label = tk.Label(header_frame, bg=BG, fg=DIM, font=("sans", 9, "bold"), anchor="e")
+    plan_label.pack(side="right")
+    # Packed after the plan label so it lands to its LEFT: a dim rule making
+    # clear the percentage is a different measure from the session counts,
+    # not a third count.
+    tk.Label(header_frame, text="│", bg=BG, fg=BAR_BG,
+             font=("sans", 9)).pack(side="right", padx=6)
 
     rows_frame = tk.Frame(root, bg=BG)
     rows_frame.pack(fill="both", expand=True, padx=10, pady=6)
@@ -145,8 +260,10 @@ def run_floating_monitor(config_data, max_rows=5):
             return
 
         live = sum(1 for s in sessions if s["is_active"])
-        total = sum(s["cost"] for s in sessions if s["cost"] is not None)
-        header.config(text=f"● {live} live   ○ {len(sessions) - live} idle   {_fmt_cost(total)}")
+        header.config(text=f"● {live} live   ○ {len(sessions) - live} idle")
+
+        text, colour = _plan_headline(config_data)
+        plan_label.config(text=text, fg=colour)
 
         for s in sessions[:max_rows]:
             name = os.path.basename(s["cwd"]) if s.get("cwd") else s["project"]

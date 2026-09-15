@@ -3,6 +3,23 @@ import json
 
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models_config.json")
 
+# Budgets live in their own file, NOT in models_config.json: that file is a
+# map of model-id -> pricing, and several callers iterate it treating every
+# key as a model name (`if model in config_data`). A non-model key there
+# would be a trap waiting for whoever adds the next loop over it.
+BUDGET_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "budget_config.json")
+
+# Unset by default, and deliberately so. A budget is a number only the user
+# can supply - it depends on their plan and on what they personally consider
+# "a lot" - and the whole point of this feature is that the denominator is
+# honest. With nothing set, the UI shows no bar instead of inventing a limit,
+# which is exactly the failure mode the rolling-window percentages already
+# guard against. `tokens` counts input + output + cache read + cache write.
+DEFAULT_BUDGET = {
+    "5h": {"tokens": None, "cost_usd": None},
+    "7d": {"tokens": None, "cost_usd": None},
+}
+
 # Per-1M-token USD rates and context windows for the Claude models Claude Code
 # can actually write into a local transcript. Input/output rates and context
 # windows come from Anthropic's published model table; cache rates follow the
@@ -216,3 +233,45 @@ def calculate_call_cost(model_key, input_tokens, output_tokens, cached_read_toke
         cost += cached_write_tokens * cache_write_rate
         
     return cost
+
+
+def load_budget():
+    """
+    Load per-window budgets, falling back to the unset default.
+
+    Never raises and never guesses: a missing, malformed or partial file just
+    yields "no budget set" for whatever it doesn't define, so a typo in the
+    file can't turn into a fabricated percentage on screen.
+    """
+    budget = {window: dict(limits) for window, limits in DEFAULT_BUDGET.items()}
+    if not os.path.exists(BUDGET_FILE):
+        return budget
+    try:
+        with open(BUDGET_FILE, 'r', encoding='utf-8') as f:
+            on_disk = json.load(f)
+    except Exception:
+        return budget
+    if not isinstance(on_disk, dict):
+        return budget
+
+    for window in budget:
+        entry = on_disk.get(window)
+        if not isinstance(entry, dict):
+            continue
+        for field in ("tokens", "cost_usd"):
+            value = entry.get(field)
+            # A zero or negative budget would divide by zero or read as
+            # "already over 100%" on the first request - treat it as unset.
+            if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:
+                budget[window][field] = value
+    return budget
+
+
+def save_budget(budget):
+    """Write budget_config.json. Returns True on success."""
+    try:
+        with open(BUDGET_FILE, 'w', encoding='utf-8') as f:
+            json.dump(budget, f, indent=4)
+        return True
+    except Exception:
+        return False

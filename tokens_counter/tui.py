@@ -145,6 +145,41 @@ def _neutral_bar(percent, length=10):
     bar = "█" * filled + "░" * (length - filled)
     return f"[cyan]{bar} {percent:.2f}%[/]"
 
+def _budget_bar(percent, used_label, limit_label, length=10):
+    """
+    Usage against the user's OWN budget, e.g. '███████░░░ 64%\n25.9M / 40.0M'.
+
+    Deliberately not clamped at 100%: going over a budget you set yourself is
+    the single most important thing this bar can tell you, so it turns red and
+    keeps counting rather than sitting at a reassuring full bar.
+    """
+    if percent is None:
+        return "[dim]not set[/]"
+    filled = int(round(min(1.0, percent / 100) * length))
+    bar = "█" * filled + "░" * (length - filled)
+    color = "green" if percent < 50 else "yellow" if percent < 80 else "red"
+    return f"[{color}]{bar} {percent:.0f}%[/]\n[dim]{used_label} / {limit_label}[/]"
+
+
+def _plan_limit_cell(percent, resets_at, length=10):
+    """
+    Claude's own plan-quota usage for one window, e.g. '████░░░░░░ 43%' over
+    'resets 18:00'. Separate from _budget_bar because that one's second line
+    is a 'used / limit' pair; here the limit is the plan's and unknown to us -
+    only the percentage and the reset time are.
+    """
+    if percent is None:
+        return "[dim]n/a[/]"
+    filled = int(round(min(1.0, max(0.0, percent / 100)) * length))
+    bar = "█" * filled + "░" * (length - filled)
+    color = "green" if percent < 50 else "yellow" if percent < 80 else "red"
+    cell = f"[{color}]{bar} {percent:.0f}%[/]"
+    when = _parse_iso(resets_at)
+    if when is not None:
+        cell += f"\n[dim]resets {when.astimezone().strftime('%b %d %H:%M')}[/]"
+    return cell
+
+
 def _format_duration(seconds):
     """
     Formats a duration in seconds as e.g. '1d 4h', '3h 12m 05s', or '45s'.
@@ -165,6 +200,19 @@ def _format_duration(seconds):
     if minutes:
         return f"{minutes}m {secs:02d}s"
     return f"{secs}s"
+
+def _parse_iso(value):
+    """Parse an ISO-8601 string (Claude's `resets_at`) to a datetime, or None."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        from datetime import datetime, timezone
+        text = value[:-1] + "+00:00" if value.endswith("Z") else value
+        parsed = datetime.fromisoformat(text)
+        return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed
+    except ValueError:
+        return None
+
 
 def _format_local_time(dt):
     """Formats a UTC datetime as a local-time string, e.g. '2026-07-24 19:57 (local)'."""
@@ -387,7 +435,7 @@ def render_session_breakdown_view(session_id, session_summary, subagents, mcp_ca
 
 MAX_TABLE_ROWS = 8
 
-def _build_subscription_status_renderables(status, rolling_usage=None):
+def _build_subscription_status_renderables(status, rolling_usage=None, plan_limits=None):
     """
     Builds the Subscription Status panels/tables as a list, without printing.
     Shared by the static (one-shot) and live-refreshing views.
@@ -443,30 +491,96 @@ def _build_subscription_status_renderables(status, rolling_usage=None):
         usage_window_table.add_column("Window", style="bold green")
         usage_window_table.add_column("Status", justify="center")
         usage_window_table.add_column("Time-in-Window %", justify="center")
+        # Only shown when the user has actually set a budget: with none set
+        # the column would be a row of "not set" teaching nothing, and the
+        # table is already wide.
+        # Claude's own plan-quota percentage wins over a self-set budget when
+        # it's there: it's the real number, the budget was only ever the
+        # honest stand-in for it. Both are absent for API-key users, in which
+        # case the column disappears rather than showing a row of "not set".
+        plan_windows = {"5h": "five_hour", "7d": "seven_day"}
+        has_plan = bool(plan_limits) and any(
+            (plan_limits or {}).get(field) for field in plan_windows.values()
+        )
+        has_budget = any(
+            (rolling_usage.get(k) or {}).get("budget_tokens_percent") is not None
+            or (rolling_usage.get(k) or {}).get("budget_cost_percent") is not None
+            for k in ("5h", "7d")
+        )
+        if has_plan:
+            usage_window_table.add_column("Plan Limit Used (real)", justify="center")
+        elif has_budget:
+            usage_window_table.add_column("vs Your Budget", justify="center")
         usage_window_table.add_column("Window Started", justify="right")
+        usage_window_table.add_column("Window Ends", justify="right")
         usage_window_table.add_column("Time Elapsed", justify="right")
 
         for key, label in (("5h", "5h window"), ("7d", "7d window")):
             w = rolling_usage.get(key, {})
+            budget_cell = []
+            if has_plan:
+                entry = (plan_limits or {}).get(plan_windows[key])
+                budget_cell = [
+                    _plan_limit_cell(entry["used_percentage"], entry.get("resets_at"))
+                    if entry else "[dim]n/a[/]"
+                ]
+            elif has_budget:
+                if w.get("budget_tokens_percent") is not None:
+                    budget_cell = [_budget_bar(
+                        w["budget_tokens_percent"],
+                        _fmt_tokens(w.get("total_tokens", 0)),
+                        _fmt_tokens(w["budget_tokens"]),
+                    )]
+                elif w.get("budget_cost_percent") is not None:
+                    budget_cell = [_budget_bar(
+                        w["budget_cost_percent"],
+                        f"${w.get('cost', 0):,.2f}",
+                        f"${w['budget_cost']:,.0f}",
+                    )]
+                else:
+                    budget_cell = ["[dim]not set[/]"]
+
             if w.get("window_start_at") is None:
-                usage_window_table.add_row(label, "[dim]Empty (no recent activity)[/]", "[dim]N/A[/]", "-", "-")
+                usage_window_table.add_row(
+                    label, "[dim]Empty (no recent activity)[/]", "[dim]N/A[/]",
+                    *budget_cell, "-", "-", "-"
+                )
             else:
+                remaining = w.get("remaining_seconds")
                 usage_window_table.add_row(
                     label,
                     "[green]Active[/]",
                     _neutral_bar(w.get("percent_used")),
+                    *budget_cell,
                     _format_local_time(w.get("window_start_at")),
+                    f"{_format_local_time(w.get('window_end_at'))}\n[dim]in {_format_duration(remaining)}[/]"
+                    if remaining is not None else "-",
                     _format_duration(w.get("elapsed_seconds"))
                 )
         renderables.append(usage_window_table)
+        if has_plan:
+            age = (plan_limits or {}).get("age_seconds")
+            freshness = (f"captured {_format_duration(age)} ago"
+                         if age is not None else "capture time unknown")
+            # The cache only refreshes while a Claude Code session renders its
+            # status line, so an old reading must say so rather than passing
+            # for current.
+            style = "yellow" if age is not None and age > 300 else "dim"
+            renderables.append(
+                f"[{style}]Plan Limit Used is Claude's own number, captured from Claude Code's status "
+                f"line ({freshness}). It only updates while a Claude Code session is running.[/]"
+            )
         renderables.append(
             "[dim]Time-in-Window % is real local elapsed time, NOT Claude Code's plan-quota %/usage limit "
-            "(that's computed server-side and requires a live account check this app doesn't make).[/]"
+            "(that's computed server-side and requires a live account check this app doesn't make). "
+            "Window Ends is when the oldest request still in the window ages out of it - the window then "
+            "re-anchors to the next oldest, it does not reset a quota. 'vs Your Budget' compares real local "
+            "usage against the limit YOU set in budget_config.json - it is not a Claude plan limit either.[/]"
         )
 
     return renderables
 
-def render_subscription_status(status, rolling_usage=None):
+def render_subscription_status(status, rolling_usage=None, plan_limits=None):
     """
     Renders Claude subscription/account status read from locally-cached OAuth
     account metadata — never the access/refresh tokens themselves — plus real
@@ -474,7 +588,7 @@ def render_subscription_status(status, rolling_usage=None):
     claude_config.get_subscription_status() and
     session_monitor.get_rolling_window_usage() for exactly what's read/computed.
     """
-    for renderable in _build_subscription_status_renderables(status, rolling_usage):
+    for renderable in _build_subscription_status_renderables(status, rolling_usage, plan_limits):
         console.print(renderable, justify="center")
         console.print()
 
@@ -561,7 +675,7 @@ def render_usage_summary(data):
         console.print(renderable, justify="center")
         console.print()
 
-def render_global_usage_live_view(status, rolling_usage, data):
+def render_global_usage_live_view(status, rolling_usage, data, plan_limits=None):
     """
     Builds (does not print) the combined Subscription Status + Global Usage
     renderables as a single Group, for use with rich.live.Live so the whole
@@ -575,7 +689,7 @@ def render_global_usage_live_view(status, rolling_usage, data):
     which is what "By Project" scrolling forever every few seconds turned
     out to be - see MAX_TABLE_ROWS for the other half of that fix.
     """
-    renderables = _build_subscription_status_renderables(status, rolling_usage)
+    renderables = _build_subscription_status_renderables(status, rolling_usage, plan_limits)
     renderables += _build_usage_summary_renderables(data)
     renderables.append("[dim]Refreshing every few seconds · Press Ctrl+C to stop and return to the menu[/]")
     return Group(*renderables)

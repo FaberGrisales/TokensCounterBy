@@ -2,6 +2,8 @@ import unittest
 import io
 import os
 import sys
+import tempfile
+import sys
 import shutil
 import tempfile
 import json
@@ -11,7 +13,7 @@ from rich.console import Console
 # Add package root to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tokens_counter.config import calculate_call_cost, load_config, DEFAULT_CONFIG, CONFIG_FILE
+from tokens_counter.config import calculate_call_cost, load_config, load_budget, DEFAULT_CONFIG, CONFIG_FILE
 from tokens_counter import session_monitor
 from tokens_counter import claude_config
 from tokens_counter import tui
@@ -376,6 +378,51 @@ class TestSessionMonitor(unittest.TestCase):
         self.assertEqual(usage["7d"]["input"], 300)
         self.assertEqual(usage["7d"]["requests"], 2)
         self.assertIsNotNone(usage["7d"]["cost"])
+
+    def test_get_rolling_window_usage_window_end_is_start_plus_duration(self):
+        """Window Ends is exactly when the oldest surviving request ages out."""
+        now = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
+        oldest = now - timedelta(hours=3)
+        self._write_session("proj-we", "session-we", [
+            _usage_line("claude-3-5-sonnet", 100, 50,
+                        timestamp=oldest.strftime("%Y-%m-%dT%H:%M:%S.000Z")),
+        ])
+        windows = session_monitor.get_rolling_window_usage(self.config_data, now=now)
+
+        five_hour = windows["5h"]
+        self.assertEqual(five_hour["window_start_at"], oldest)
+        self.assertEqual(five_hour["window_end_at"], oldest + timedelta(hours=5))
+        # 3h in, so 2h of the 5h window is left.
+        self.assertAlmostEqual(five_hour["remaining_seconds"], 2 * 3600, places=3)
+
+        seven_day = windows["7d"]
+        self.assertEqual(seven_day["window_end_at"], oldest + timedelta(days=7))
+        self.assertAlmostEqual(seven_day["remaining_seconds"],
+                               (oldest + timedelta(days=7) - now).total_seconds(), places=3)
+
+    def test_get_rolling_window_usage_window_end_is_none_when_empty(self):
+        """An empty window reports no end time rather than inventing one."""
+        now = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
+        windows = session_monitor.get_rolling_window_usage(self.config_data, now=now)
+        for key in ("5h", "7d"):
+            self.assertIsNone(windows[key]["window_end_at"])
+            self.assertIsNone(windows[key]["remaining_seconds"])
+
+    def test_get_rolling_window_usage_remaining_never_negative(self):
+        """
+        A request exactly at the cutoff must not produce a negative remainder.
+
+        elapsed_seconds is capped at the window duration, so remaining_seconds
+        has to floor at zero to stay consistent with it.
+        """
+        now = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
+        edge = now - timedelta(hours=5) + timedelta(seconds=1)
+        self._write_session("proj-edge", "session-edge", [
+            _usage_line("claude-3-5-sonnet", 10, 5,
+                        timestamp=edge.strftime("%Y-%m-%dT%H:%M:%S.000Z")),
+        ])
+        five_hour = session_monitor.get_rolling_window_usage(self.config_data, now=now)["5h"]
+        self.assertGreaterEqual(five_hour["remaining_seconds"], 0.0)
 
     def test_get_rolling_window_usage_empty_when_no_sessions(self):
         usage = session_monitor.get_rolling_window_usage(self.config_data)
@@ -835,3 +882,513 @@ class TestFloatingWindowFormatting(unittest.TestCase):
         self.assertEqual(floating._context_color(10), floating.LIVE)     # green
         self.assertEqual(floating._context_color(65), floating.ACCENT)   # yellow
         self.assertNotIn(floating._context_color(95), (floating.LIVE, floating.ACCENT))
+
+
+class TestBudgets(unittest.TestCase):
+    """
+    User-defined budgets - the only honest percentage-of-consumption this app
+    can show, since Claude's real plan quota is server-side and unreadable.
+    """
+
+    def _usage(self, cost=10.0):
+        return {"5h": {"input": 100, "output": 50, "cache_read": 800, "cache_write": 50, "cost": cost},
+                "7d": {"input": 200, "output": 100, "cache_read": 1600, "cache_write": 100, "cost": cost * 2}}
+
+    def test_total_tokens_counts_every_kind(self):
+        """A budget you set has to be measured against everything that was billed."""
+        out = session_monitor.apply_budgets(self._usage(), {})
+        self.assertEqual(out["5h"]["total_tokens"], 100 + 50 + 800 + 50)
+
+    def test_no_budget_means_no_percentage_rather_than_a_guess(self):
+        out = session_monitor.apply_budgets(self._usage(), {})
+        for key in ("5h", "7d"):
+            self.assertIsNone(out[key]["budget_tokens_percent"])
+            self.assertIsNone(out[key]["budget_cost_percent"])
+
+    def test_token_budget_percentage(self):
+        out = session_monitor.apply_budgets(self._usage(), {"5h": {"tokens": 2000}})
+        self.assertAlmostEqual(out["5h"]["budget_tokens_percent"], 50.0)  # 1000 of 2000
+
+    def test_cost_budget_percentage(self):
+        out = session_monitor.apply_budgets(self._usage(cost=25.0), {"7d": {"cost_usd": 200}})
+        self.assertAlmostEqual(out["7d"]["budget_cost_percent"], 25.0)    # $50 of $200
+
+    def test_percentage_is_not_clamped_at_100(self):
+        """
+        Going over a budget you set yourself is the most important thing the
+        bar can say. Clamping it would hide exactly that.
+        """
+        out = session_monitor.apply_budgets(self._usage(), {"5h": {"tokens": 500}})
+        self.assertGreater(out["5h"]["budget_tokens_percent"], 100)
+
+    def test_cost_budget_is_none_when_the_window_has_no_priced_model(self):
+        usage = self._usage()
+        usage["5h"]["cost"] = None
+        out = session_monitor.apply_budgets(usage, {"5h": {"cost_usd": 100}})
+        self.assertIsNone(out["5h"]["budget_cost_percent"])
+
+    def test_load_budget_defaults_to_unset(self):
+        budget = load_budget()
+        for window in ("5h", "7d"):
+            self.assertIn(window, budget)
+
+    def test_load_budget_rejects_nonsense_values(self):
+        """
+        Zero, negative and boolean limits are treated as unset. A zero limit
+        would divide by zero; a negative one would render as a nonsense
+        percentage on the first request.
+        """
+        import json as _json
+        import tempfile as _tempfile
+        from tokens_counter import config as _config
+
+        real_file = _config.BUDGET_FILE
+        tmp = _tempfile.mkdtemp()
+        try:
+            _config.BUDGET_FILE = os.path.join(tmp, "budget_config.json")
+            with open(_config.BUDGET_FILE, "w") as f:
+                _json.dump({"5h": {"tokens": 0, "cost_usd": -5},
+                            "7d": {"tokens": True, "cost_usd": 150}}, f)
+            budget = _config.load_budget()
+            self.assertIsNone(budget["5h"]["tokens"])
+            self.assertIsNone(budget["5h"]["cost_usd"])
+            self.assertIsNone(budget["7d"]["tokens"])   # True is not a budget
+            self.assertEqual(budget["7d"]["cost_usd"], 150)
+        finally:
+            _config.BUDGET_FILE = real_file
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_load_budget_survives_a_corrupt_file(self):
+        import tempfile as _tempfile
+        from tokens_counter import config as _config
+        real_file = _config.BUDGET_FILE
+        tmp = _tempfile.mkdtemp()
+        try:
+            _config.BUDGET_FILE = os.path.join(tmp, "budget_config.json")
+            with open(_config.BUDGET_FILE, "w") as f:
+                f.write("{not json at all")
+            budget = _config.load_budget()
+            self.assertIsNone(budget["5h"]["tokens"])
+        finally:
+            _config.BUDGET_FILE = real_file
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+class TestPlanRateLimits(unittest.TestCase):
+    """
+    The real 5h/7d plan percentages, captured from Claude Code's status line.
+    These are the numbers the app cannot compute or fetch itself.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.cache = os.path.join(self.tmp, "rate_limits_cache.json")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _write(self, payload):
+        """Writes a cache as statusline.py would - provenance marker included."""
+        with open(self.cache, "w") as f:
+            json.dump({"source": "claude-code-statusline", **payload}, f)
+
+    def test_returns_none_when_never_captured(self):
+        """No cache means the status line isn't installed - say nothing, don't guess."""
+        self.assertIsNone(claude_config.get_plan_rate_limits(self.cache))
+
+    def test_reads_both_windows(self):
+        self._write({"captured_at": "2026-09-14T20:00:00Z", "rate_limits_available": True,
+                     "rate_limits": {"five_hour": {"used_percentage": 42.7, "resets_at": "2026-09-14T23:00:00Z"},
+                                     "seven_day": {"used_percentage": 12.5, "resets_at": "2026-09-19T07:00:00Z"}}})
+        limits = claude_config.get_plan_rate_limits(self.cache)
+        self.assertAlmostEqual(limits["five_hour"]["used_percentage"], 42.7)
+        self.assertAlmostEqual(limits["seven_day"]["used_percentage"], 12.5)
+        self.assertEqual(limits["five_hour"]["resets_at"], "2026-09-14T23:00:00Z")
+
+    def test_reports_age_so_a_stale_reading_cannot_pass_for_current(self):
+        """
+        The cache only refreshes while a Claude Code session renders its
+        status line. An old percentage presented as current would be exactly
+        the believable-but-wrong number this app avoids everywhere.
+        """
+        old = datetime.now(timezone.utc) - timedelta(hours=3)
+        self._write({"captured_at": old.isoformat(), "rate_limits_available": True,
+                     "rate_limits": {"five_hour": {"used_percentage": 10.0}}})
+        limits = claude_config.get_plan_rate_limits(self.cache)
+        self.assertGreater(limits["age_seconds"], 3 * 3600 - 60)
+
+    def test_available_false_is_preserved(self):
+        """API-key/Bedrock/Vertex sessions genuinely have no plan limits."""
+        self._write({"captured_at": "2026-09-14T20:00:00Z",
+                     "rate_limits_available": False, "rate_limits": None})
+        limits = claude_config.get_plan_rate_limits(self.cache)
+        self.assertFalse(limits["available"])
+        self.assertIsNone(limits["five_hour"])
+
+    def test_malformed_percentages_are_dropped_not_shown(self):
+        self._write({"captured_at": "2026-09-14T20:00:00Z", "rate_limits_available": True,
+                     "rate_limits": {"five_hour": {"used_percentage": "lots"},
+                                     "seven_day": {"used_percentage": True}}})
+        limits = claude_config.get_plan_rate_limits(self.cache)
+        self.assertIsNone(limits["five_hour"])
+        self.assertIsNone(limits["seven_day"])
+
+    def test_statusline_command_survives_a_path_with_spaces(self):
+        """
+        Claude Code runs statusLine.command through a shell. An unquoted path
+        containing a space is split into separate arguments and the script
+        never runs - with no error shown anywhere, so the status line just
+        stays blank. This shipped broken once; the test exists to keep it
+        from shipping broken again.
+        """
+        import shlex
+        command = claude_config.statusline_command("/usr/bin/python3")
+        parts = shlex.split(command)          # exactly what a shell would do
+        self.assertEqual(len(parts), 2, f"shell would split this into {parts}")
+        self.assertEqual(parts[0], "/usr/bin/python3")
+        self.assertTrue(parts[1].endswith("statusline.py"))
+        self.assertTrue(os.path.exists(parts[1]), f"{parts[1]} is not a real path")
+
+    def test_statusline_command_runs_through_a_shell(self):
+        """End-to-end: the exact installed string must work when a shell runs it."""
+        import subprocess
+        command = claude_config.statusline_command()
+        result = subprocess.run(
+            command, shell=True, input='{"rate_limits_available":false,"rate_limits":null}',
+            capture_output=True, text=True, timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, f"shell run failed: {result.stderr}")
+
+    def test_install_preserves_other_settings_and_backs_up(self):
+        path = os.path.join(self.tmp, "settings.json")
+        with open(path, "w") as f:
+            json.dump({"model": "opus", "hooks": {"PreToolUse": []}}, f)
+
+        ok, _ = claude_config.install_statusline(path)
+        self.assertTrue(ok)
+        with open(path) as f:
+            after = json.load(f)
+        self.assertEqual(after["model"], "opus")
+        self.assertIn("hooks", after)
+        self.assertEqual(after["statusLine"]["type"], "command")
+        self.assertTrue(os.path.exists(path + ".bak-tokenscounter"))
+
+    def test_install_refuses_to_overwrite_an_unparseable_settings_file(self):
+        """
+        settings.json drives every Claude Code session, not just this app.
+        A file we can't parse might still be valid to Claude Code, so
+        clobbering it with a fresh dict is not an acceptable failure mode.
+        """
+        path = os.path.join(self.tmp, "settings.json")
+        with open(path, "w") as f:
+            f.write("{ not json")
+        ok, message = claude_config.install_statusline(path)
+        self.assertFalse(ok)
+        self.assertIn("couldn't be parsed", message)
+        with open(path) as f:
+            self.assertEqual(f.read(), "{ not json")   # untouched
+
+
+class TestStatuslineScript(unittest.TestCase):
+    """The capture script runs inside the user's Claude Code on every render."""
+
+    def _run(self, stdin_text):
+        import subprocess
+        script = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                              "tokens_counter", "statusline.py")
+        return subprocess.run([sys.executable, script], input=stdin_text,
+                              capture_output=True, text=True, timeout=30)
+
+    def test_never_fails_on_bad_input(self):
+        """
+        A crash here breaks the user's status line, not just this feature.
+        Empty, non-JSON and limit-less payloads must all exit cleanly.
+        """
+        for payload in ("", "not json at all", "{}", '{"rate_limits": null}'):
+            result = self._run(payload)
+            self.assertEqual(result.returncode, 0, f"failed on {payload!r}: {result.stderr}")
+
+    def test_prints_the_percentages_it_captured(self):
+        result = self._run('{"model":{"display_name":"Opus 5"},"rate_limits_available":true,'
+                           '"rate_limits":{"five_hour":{"used_percentage":42.7},'
+                           '"seven_day":{"used_percentage":12.5}}}')
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("5h 43%", result.stdout)
+        self.assertIn("7d 12%", result.stdout)
+
+
+class TestFloatingPlanHeadline(unittest.TestCase):
+    """
+    The floating window's headline. It replaced the total-spend figure with
+    Claude's real 5h plan percentage, but that number only exists when the
+    status line capture is installed and the account has plan limits at all,
+    so the fallback chain is the part worth pinning down.
+    """
+
+    def setUp(self):
+        from tokens_counter import statusline
+        self.statusline = statusline
+        self.real_cache = statusline.CACHE_FILE
+        self.tmp = tempfile.mkdtemp()
+        statusline.CACHE_FILE = os.path.join(self.tmp, "rate_limits_cache.json")
+        self.config_data = load_config()
+
+    def tearDown(self):
+        self.statusline.CACHE_FILE = self.real_cache
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _write_cache(self, percent, age_minutes=0, resets_at=None):
+        captured = datetime.now(timezone.utc) - timedelta(minutes=age_minutes)
+        five_hour = {"used_percentage": percent}
+        if resets_at:
+            five_hour["resets_at"] = resets_at
+        with open(self.statusline.CACHE_FILE, "w") as f:
+            json.dump({"source": "claude-code-statusline", "captured_at": captured.isoformat(),
+                       "rate_limits_available": True,
+                       "rate_limits": {"five_hour": five_hour}}, f)
+
+    def test_shows_the_real_five_hour_percentage(self):
+        self._write_cache(43.0)
+        text, _ = floating._plan_headline(self.config_data)
+        self.assertEqual(text, "5h 43%")
+
+    def test_shows_the_reset_countdown_when_claude_sends_one(self):
+        resets = (datetime.now(timezone.utc) + timedelta(minutes=9)).isoformat()
+        self._write_cache(43.0, resets_at=resets)
+        text, _ = floating._plan_headline(self.config_data)
+        self.assertEqual(text, "5h 43% · resets 9m")
+
+    def test_reset_label_never_pairs_the_window_name_with_a_duration(self):
+        """
+        "5h:2h" (window name next to an hours countdown) is unreadable, and
+        "9m left" beside a percentage reads as leftover quota rather than
+        time. The label must name what the duration is.
+        """
+        resets = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()
+        self._write_cache(12.0, resets_at=resets)
+        text, _ = floating._plan_headline(self.config_data)
+        self.assertIn("resets 2h", text)
+        self.assertNotIn("5h:2h", text)
+        self.assertNotIn("left", text)
+
+    def test_countdown_says_now_rather_than_going_negative(self):
+        past = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+        self.assertEqual(floating._time_until(past), "now")
+
+    def test_countdown_ignores_a_missing_or_broken_reset_time(self):
+        self.assertIsNone(floating._time_until(None))
+        self.assertIsNone(floating._time_until("not a timestamp"))
+        self._write_cache(43.0)  # no resets_at at all
+        text, _ = floating._plan_headline(self.config_data)
+        self.assertNotIn("resets", text)
+
+    def test_colour_follows_severity(self):
+        for percent, expected in ((12.0, floating.LIVE), (65.0, floating.ACCENT)):
+            self._write_cache(percent)
+            _, colour = floating._plan_headline(self.config_data)
+            self.assertEqual(colour, expected)
+        self._write_cache(94.0)
+        _, colour = floating._plan_headline(self.config_data)
+        self.assertNotIn(colour, (floating.LIVE, floating.ACCENT))
+
+    def test_stale_reading_is_marked_not_passed_off_as_current(self):
+        """
+        The cache only refreshes while a Claude Code session renders its status
+        line, so an idle machine's number ages silently. It must look different.
+        """
+        self._write_cache(43.0, age_minutes=30)
+        text, _ = floating._plan_headline(self.config_data)
+        self.assertTrue(text.endswith("?"), text)
+
+    def test_falls_back_rather_than_going_blank(self):
+        """With no capture at all the widget still shows something useful."""
+        text, _ = floating._plan_headline(self.config_data)
+        self.assertTrue(text.strip())
+
+    def test_never_raises_on_a_corrupt_cache(self):
+        """A broken cache must not take down the window's refresh loop."""
+        with open(self.statusline.CACHE_FILE, "w") as f:
+            f.write("{ not json")
+        text, colour = floating._plan_headline(self.config_data)
+        self.assertTrue(text.strip())
+        self.assertTrue(colour)
+
+
+class TestCacheProvenance(unittest.TestCase):
+    """A cache this app didn't write must never be shown as a real reading."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.cache = os.path.join(self.tmp, "rate_limits_cache.json")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_unmarked_cache_is_ignored(self):
+        """
+        Exactly the shape a scratch script would write: plausible numbers, no
+        provenance. During development this showed a fabricated "5h 43%" as
+        though Claude had reported it.
+        """
+        with open(self.cache, "w") as f:
+            json.dump({"captured_at": datetime.now(timezone.utc).isoformat(),
+                       "rate_limits_available": True,
+                       "rate_limits": {"five_hour": {"used_percentage": 42.7}}}, f)
+        self.assertIsNone(claude_config.get_plan_rate_limits(self.cache))
+
+    def test_marked_cache_is_accepted(self):
+        with open(self.cache, "w") as f:
+            json.dump({"source": "claude-code-statusline",
+                       "captured_at": datetime.now(timezone.utc).isoformat(),
+                       "rate_limits_available": True,
+                       "rate_limits": {"five_hour": {"used_percentage": 42.7}}}, f)
+        limits = claude_config.get_plan_rate_limits(self.cache)
+        self.assertAlmostEqual(limits["five_hour"]["used_percentage"], 42.7)
+
+    def test_the_script_stamps_what_the_reader_requires(self):
+        """The writer's marker and the reader's check must not drift apart."""
+        import subprocess
+        script = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                              "tokens_counter", "statusline.py")
+        from tokens_counter import statusline
+        real = statusline.CACHE_FILE
+        try:
+            statusline.CACHE_FILE = self.cache
+            subprocess.run([sys.executable, script],
+                           input='{"rate_limits_available":true,"rate_limits":'
+                                 '{"five_hour":{"used_percentage":7.0}}}',
+                           capture_output=True, text=True, timeout=30,
+                           env={**os.environ, "TOKENS_COUNTER_CACHE": self.cache})
+        finally:
+            statusline.CACHE_FILE = real
+        # The script writes to its own CACHE_FILE; assert the constant itself
+        # is what the reader demands.
+        self.assertEqual(statusline.CACHE_SOURCE, "claude-code-statusline")
+
+
+class TestPortability(unittest.TestCase):
+    """
+    The app has to install and run on any machine, not just the one it was
+    written on. These pin the pieces that are easy to hardcode by accident.
+    """
+
+    def test_no_machine_specific_paths_in_the_source(self):
+        """A path from the author's machine would break every other install."""
+        import ast
+        import glob
+
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        offenders = []
+        for path in glob.glob(os.path.join(root, "tokens_counter", "*.py")) + \
+                    [os.path.join(root, "start.py")]:
+            with open(path, encoding="utf-8") as f:
+                tree = ast.parse(f.read(), filename=path)
+
+            # Docstrings legitimately cite example paths while explaining why
+            # they must not be hardcoded. Every OTHER string is real code and
+            # is exactly where a machine-specific path would hide, so those
+            # are checked - skipping all strings would make this test blind
+            # to the one case it exists for.
+            docstrings = set()
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.Module, ast.ClassDef,
+                                     ast.FunctionDef, ast.AsyncFunctionDef)):
+                    body = getattr(node, "body", None)
+                    if (body and isinstance(body[0], ast.Expr)
+                            and isinstance(body[0].value, ast.Constant)
+                            and isinstance(body[0].value.value, str)):
+                        docstrings.add(id(body[0].value))
+
+            for node in ast.walk(tree):
+                if (isinstance(node, ast.Constant) and isinstance(node.value, str)
+                        and id(node) not in docstrings):
+                    if "/home/" in node.value or "C:\\Users" in node.value:
+                        offenders.append(f"{os.path.basename(path)}:{node.lineno}")
+        self.assertEqual(offenders, [], f"machine-specific paths in {offenders}")
+
+    def test_cache_lives_outside_the_repo(self):
+        """
+        The repo may be read-only (system-wide install, root-owned checkout),
+        and a cache inside the source tree also travels with every clone.
+        """
+        from tokens_counter import statusline
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        self.assertFalse(
+            os.path.abspath(statusline.CACHE_FILE).startswith(os.path.abspath(root) + os.sep),
+            f"cache is inside the repo: {statusline.CACHE_FILE}",
+        )
+
+    def test_cache_path_is_overridable(self):
+        """A packaged or sandboxed install must be able to redirect it."""
+        import importlib
+        from tokens_counter import statusline
+        previous = os.environ.get("TOKENS_COUNTER_CACHE")
+        try:
+            os.environ["TOKENS_COUNTER_CACHE"] = "/tmp/somewhere-else/cache.json"
+            reloaded = importlib.reload(statusline)
+            self.assertEqual(reloaded.CACHE_FILE, "/tmp/somewhere-else/cache.json")
+        finally:
+            if previous is None:
+                os.environ.pop("TOKENS_COUNTER_CACHE", None)
+            else:
+                os.environ["TOKENS_COUNTER_CACHE"] = previous
+            importlib.reload(statusline)
+
+    def test_statusline_points_at_this_copy_of_the_app(self):
+        """Two checkouts on one machine must not fight over one command."""
+        import shlex
+        script = shlex.split(claude_config.statusline_command())[1]
+        expected = os.path.join(os.path.dirname(os.path.abspath(claude_config.__file__)),
+                                "statusline.py")
+        self.assertEqual(os.path.abspath(script), os.path.abspath(expected))
+
+
+class TestStatuslineDiagnostics(unittest.TestCase):
+    """
+    A broken statusLine command produces no error anywhere - Claude Code just
+    renders nothing. Option 7 therefore has to diagnose it itself.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.real_dir = claude_config.get_claude_config_dir
+        from pathlib import Path
+        claude_config.get_claude_config_dir = lambda: Path(self.tmp)
+        self.here = os.path.dirname(os.path.abspath(claude_config.__file__))
+
+    def tearDown(self):
+        claude_config.get_claude_config_dir = self.real_dir
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _set(self, command):
+        with open(os.path.join(self.tmp, "settings.json"), "w") as f:
+            json.dump({"statusLine": {"type": "command", "command": command}}, f)
+
+    def test_detects_an_unquoted_path_with_spaces(self):
+        """The bug that shipped: a space in the path splits the command."""
+        self._set(f"/usr/bin/python3 {self.here}/statusline.py")
+        problems = claude_config.statusline_status_report()["problems"]
+        self.assertTrue(any("shell arguments" in p for p in problems), problems)
+
+    def test_detects_a_deleted_virtualenv(self):
+        self._set(f"'/gone/venv/bin/python3' '{self.here}/statusline.py'")
+        problems = claude_config.statusline_status_report()["problems"]
+        self.assertTrue(any("Python it points at" in p for p in problems), problems)
+
+    def test_detects_a_moved_repo(self):
+        self._set("/usr/bin/python3 '/old/location/tokens_counter/statusline.py'")
+        problems = claude_config.statusline_status_report()["problems"]
+        self.assertTrue(any("no longer exists" in p for p in problems), problems)
+
+    def test_a_correct_command_reports_no_problems(self):
+        self._set(claude_config.statusline_command())
+        report = claude_config.statusline_status_report()
+        self.assertTrue(report["ours"])
+        self.assertEqual(report["problems"], [])
+
+    def test_someone_elses_statusline_is_not_claimed_as_ours(self):
+        self._set("/usr/bin/starship prompt")
+        report = claude_config.statusline_status_report()
+        self.assertTrue(report["installed"])
+        self.assertFalse(report["ours"])
+        self.assertEqual(report["problems"], [])

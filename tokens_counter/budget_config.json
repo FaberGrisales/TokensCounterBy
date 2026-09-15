@@ -1,0 +1,11 @@
+{
+    "_comment": "Your own token/cost budget per rolling window, used by Option 2's 'vs Budget' bar. These are NOT Claude's plan limits - this app cannot read those (they are computed server-side). Set a number to see a percentage; leave null to hide the bar. 'tokens' counts input + output + cache read + cache write.",
+    "5h": {
+        "tokens": null,
+        "cost_usd": null
+    },
+    "7d": {
+        "tokens": null,
+        "cost_usd": null
+    }
+}
