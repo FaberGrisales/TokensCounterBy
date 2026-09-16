@@ -3,6 +3,7 @@ import io
 import os
 import sys
 import tempfile
+import time
 import sys
 import shutil
 import tempfile
@@ -1437,3 +1438,106 @@ class TestStatuslineDiagnostics(unittest.TestCase):
         self.assertTrue(report["installed"])
         self.assertFalse(report["ours"])
         self.assertEqual(report["problems"], [])
+
+
+class TestNewSessionDoesNotWipeTheReading(unittest.TestCase):
+    """
+    A brand-new Claude Code session renders its status line before it knows
+    the account's rate limits, so it sends `rate_limits: null`. Writing that
+    straight through wiped a good reading and the UI silently dropped back to
+    total spend until the user touched an older session.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.cache = os.path.join(self.tmp, "rate_limits_cache.json")
+        self.script = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "tokens_counter", "statusline.py")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _render(self, payload):
+        """Run the status line script exactly as Claude Code would."""
+        import subprocess
+        return subprocess.run(
+            [sys.executable, self.script], input=payload, capture_output=True,
+            text=True, timeout=30, env={**os.environ, "TOKENS_COUNTER_CACHE": self.cache})
+
+    def _cache(self):
+        with open(self.cache) as f:
+            return json.load(f)
+
+    GOOD = ('{"rate_limits_available":true,"rate_limits":'
+            '{"five_hour":{"used_percentage":47,"resets_at":1789451400},'
+            '"seven_day":{"used_percentage":25}}}')
+    NEW_SESSION = '{"rate_limits_available":null,"rate_limits":null}'
+
+    def test_a_new_session_does_not_erase_the_previous_reading(self):
+        self._render(self.GOOD)
+        self._render(self.NEW_SESSION)
+        windows = self._cache()["rate_limits"]
+        self.assertEqual(windows["five_hour"]["used_percentage"], 47)
+        self.assertEqual(windows["seven_day"]["used_percentage"], 25)
+
+    def test_a_carried_forward_window_keeps_its_original_capture_time(self):
+        """
+        Preserving the value must not preserve the impression it is current:
+        the file's top-level timestamp refreshes every render, so the window
+        has to carry its own or a stale number would read as freshly measured.
+        """
+        self._render(self.GOOD)
+        original = self._cache()["rate_limits"]["five_hour"]["captured_at"]
+        time.sleep(0.05)
+        self._render(self.NEW_SESSION)
+        after = self._cache()
+        self.assertEqual(after["rate_limits"]["five_hour"]["captured_at"], original)
+        self.assertNotEqual(after["captured_at"], original)
+
+    def test_a_fresh_reading_replaces_the_carried_forward_one(self):
+        self._render(self.GOOD)
+        self._render(self.NEW_SESSION)
+        self._render('{"rate_limits_available":true,"rate_limits":'
+                     '{"five_hour":{"used_percentage":62}}}')
+        self.assertEqual(self._cache()["rate_limits"]["five_hour"]["used_percentage"], 62)
+
+    def test_availability_is_not_downgraded_by_a_silent_session(self):
+        """Reporting nothing is not the same as reporting that limits don't apply."""
+        self._render(self.GOOD)
+        self._render(self.NEW_SESSION)
+        self.assertTrue(self._cache()["rate_limits_available"])
+
+    def test_an_explicit_no_limits_answer_is_still_honoured(self):
+        """An API-key session genuinely has none - that answer must stick."""
+        self._render(self.GOOD)
+        self._render('{"rate_limits_available":false,"rate_limits":null}')
+        self.assertFalse(self._cache()["rate_limits_available"])
+
+    def test_reader_reports_the_windows_own_age(self):
+        self._render(self.GOOD)
+        stale = (datetime.now(timezone.utc) - timedelta(hours=3)).isoformat()
+        data = self._cache()
+        data["rate_limits"]["five_hour"]["captured_at"] = stale
+        with open(self.cache, "w") as f:
+            json.dump(data, f)
+
+        limits = claude_config.get_plan_rate_limits(self.cache)
+        self.assertGreater(limits["five_hour"]["age_seconds"], 3 * 3600 - 60)
+
+    def test_widget_marks_a_carried_forward_reading_stale(self):
+        from tokens_counter import statusline
+        self._render(self.GOOD)
+        data = self._cache()
+        data["rate_limits"]["five_hour"]["captured_at"] = (
+            datetime.now(timezone.utc) - timedelta(hours=3)).isoformat()
+        with open(self.cache, "w") as f:
+            json.dump(data, f)
+
+        real = statusline.CACHE_FILE
+        try:
+            statusline.CACHE_FILE = self.cache
+            text, _ = floating._plan_headline(load_config())
+        finally:
+            statusline.CACHE_FILE = real
+        self.assertIn("?", text)

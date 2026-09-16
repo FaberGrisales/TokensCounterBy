@@ -103,6 +103,54 @@ def _write_cache(payload):
         pass
 
 
+def _read_cache():
+    """The previous cache, or None. Only ours - an unmarked file is ignored."""
+    try:
+        with open(CACHE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return None
+    return data if isinstance(data, dict) and data.get("source") == CACHE_SOURCE else None
+
+
+def _usable(entry):
+    """True if `entry` carries a real percentage."""
+    if not isinstance(entry, dict):
+        return False
+    value = entry.get("used_percentage")
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _merge_with_previous(rate_limits, captured_at):
+    """
+    Stamp each fresh window, and carry the last good one forward when Claude
+    sends none for it.
+
+    A brand-new Claude Code session renders its status line before it has the
+    account's rate limits, so it passes `rate_limits: null`. Writing that
+    straight through wiped a perfectly good reading, and the UI dropped back
+    to showing total spend until the user touched an older session - which is
+    exactly the bug this fixes.
+
+    A carried-forward window keeps its ORIGINAL `captured_at`, so it ages
+    normally and the UI still marks it stale. Preserving the value must not
+    also preserve the impression that it is current.
+    """
+    previous = (_read_cache() or {}).get("rate_limits") or {}
+    if not isinstance(previous, dict):
+        previous = {}
+    incoming = rate_limits if isinstance(rate_limits, dict) else {}
+
+    merged = {}
+    for window in set(incoming) | set(previous):
+        entry = incoming.get(window)
+        if _usable(entry):
+            merged[window] = {**entry, "captured_at": captured_at}
+        elif _usable(previous.get(window)):
+            merged[window] = previous[window]
+    return merged or None
+
+
 def _percent(rate_limits, window):
     entry = (rate_limits or {}).get(window)
     if not isinstance(entry, dict):
@@ -121,9 +169,18 @@ def main():
     rate_limits = data.get("rate_limits") if isinstance(data, dict) else None
     available = data.get("rate_limits_available") if isinstance(data, dict) else None
 
+    captured_at = datetime.now(timezone.utc).isoformat()
+    previous = _read_cache() or {}
+    rate_limits = _merge_with_previous(rate_limits, captured_at)
+    if available is None:
+        # Same reasoning as the windows: a new session reports nothing about
+        # whether plan limits apply, which is not the same as reporting that
+        # they don't.
+        available = previous.get("rate_limits_available")
+
     _write_cache({
         "source": CACHE_SOURCE,
-        "captured_at": datetime.now(timezone.utc).isoformat(),
+        "captured_at": captured_at,
         "rate_limits_available": available,
         "rate_limits": rate_limits,
     })

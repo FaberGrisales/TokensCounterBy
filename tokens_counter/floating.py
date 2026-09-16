@@ -172,7 +172,11 @@ def _plan_headline(config_data):
     five_hour = (limits or {}).get("five_hour")
     if five_hour:
         percent = five_hour["used_percentage"]
-        age = (limits or {}).get("age_seconds")
+        # This window's own age, not the file's: a value carried forward
+        # across a new session must still read as stale once it is.
+        age = five_hour.get("age_seconds")
+        if age is None:
+            age = (limits or {}).get("age_seconds")
         stale = "?" if age is not None and age > STALE_AFTER_SECONDS else ""
         # "5h 43% · resets 9m", not "5h:9m · 43%": juxtaposing the window name
         # with a duration reads as nonsense the moment the countdown is also

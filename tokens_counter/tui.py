@@ -558,7 +558,12 @@ def _build_subscription_status_renderables(status, rolling_usage=None, plan_limi
                 )
         renderables.append(usage_window_table)
         if has_plan:
-            age = (plan_limits or {}).get("age_seconds")
+            # Oldest of the windows shown, so the note can't understate how
+            # stale the table is.
+            ages = [w.get("age_seconds") for w in
+                    ((plan_limits or {}).get(f) for f in plan_windows.values())
+                    if w and w.get("age_seconds") is not None]
+            age = max(ages) if ages else (plan_limits or {}).get("age_seconds")
             freshness = (f"captured {_format_duration(age)} ago"
                          if age is not None else "capture time unknown")
             # The cache only refreshes while a Claude Code session renders its

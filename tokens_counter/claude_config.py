@@ -175,6 +175,16 @@ def get_plan_rate_limits(cache_file=None):
     rate_limits = data.get("rate_limits")
     rate_limits = rate_limits if isinstance(rate_limits, dict) else {}
 
+    def parse_captured(value):
+        if not isinstance(value, str):
+            return None
+        try:
+            text = value[:-1] + "+00:00" if value.endswith("Z") else value
+            parsed = datetime.fromisoformat(text)
+            return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed
+        except ValueError:
+            return None
+
     def window(key):
         entry = rate_limits.get(key)
         if not isinstance(entry, dict):
@@ -182,7 +192,22 @@ def get_plan_rate_limits(cache_file=None):
         percent = entry.get("used_percentage")
         if not isinstance(percent, (int, float)) or isinstance(percent, bool):
             return None
-        return {"used_percentage": float(percent), "resets_at": entry.get("resets_at")}
+
+        # Per-window age, from the window's OWN capture time. A window carried
+        # forward because a new session reported nothing keeps its original
+        # timestamp, while the file's top-level captured_at is refreshed on
+        # every render - reading the top-level one would make a preserved
+        # value look freshly measured, which is the impression this whole
+        # feature exists not to give.
+        own_captured = parse_captured(entry.get("captured_at"))
+        own_age = (max(0.0, (datetime.now(timezone.utc) - own_captured).total_seconds())
+                   if own_captured else None)
+        return {
+            "used_percentage": float(percent),
+            "resets_at": entry.get("resets_at"),
+            "captured_at": own_captured,
+            "age_seconds": own_age,
+        }
 
     captured_at = None
     age_seconds = None
