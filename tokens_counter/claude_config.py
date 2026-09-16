@@ -231,6 +231,19 @@ def get_plan_rate_limits(cache_file=None):
     }
 
 
+# Seconds between status line re-runs, on top of Claude Code's own
+# event-driven updates ("Re-run the status line command every N seconds in
+# addition to event-driven updates" - its settings schema, where the field is
+# in seconds with a minimum of 1).
+#
+# This is what keeps the captured plan percentage fresh while you work, so an
+# actively-used session doesn't drift into showing a stale reading. It costs
+# nothing beyond spawning a local stdlib-only script: no network call, no
+# tokens. And it is inherently activity-gated - Claude Code only runs the
+# command while a session is open, so an idle machine polls nothing at all.
+STATUSLINE_REFRESH_SECONDS = 30
+
+
 def _stable_python():
     """
     An interpreter that will still exist later, for the installed command.
@@ -276,10 +289,17 @@ def statusline_status_report():
     status_line = settings.get("statusLine") if isinstance(settings, dict) else None
     command = status_line.get("command") if isinstance(status_line, dict) else None
     if not isinstance(command, str) or not command.strip():
-        return {"installed": False, "ours": False, "command": None, "problems": []}
+        return {"installed": False, "ours": False, "command": None,
+                "refresh_interval": None, "problems": []}
 
     ours = "statusline.py" in command and "tokens_counter" in command
-    report = {"installed": True, "ours": ours, "command": command, "problems": []}
+    report = {
+        "installed": True,
+        "ours": ours,
+        "command": command,
+        "refresh_interval": status_line.get("refreshInterval"),
+        "problems": [],
+    }
     if not ours:
         return report
 
@@ -399,7 +419,11 @@ def install_statusline(settings_path=None):
         except OSError as e:
             return False, f"Could not back up {path}: {e}"
 
-    settings["statusLine"] = {"type": "command", "command": statusline_command()}
+    settings["statusLine"] = {
+        "type": "command",
+        "command": statusline_command(),
+        "refreshInterval": STATUSLINE_REFRESH_SECONDS,
+    }
 
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)

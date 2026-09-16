@@ -287,8 +287,31 @@ def main():
                 input("\nPress Enter to return...")
                 continue
 
+            if installed and report.get("refresh_interval") is None:
+                # An install from before refreshInterval existed: it works,
+                # but only updates on Claude Code's own events, so the reading
+                # can drift stale mid-session.
+                tui.console.print("[green]Installed[/], but without a refresh interval.")
+                tui.console.print(
+                    f"[dim]Adding refreshInterval={claude_config.STATUSLINE_REFRESH_SECONDS}s keeps the "
+                    "reading fresh while you work. It costs nothing - no network call, no "
+                    "tokens - and only runs while a Claude Code session is open.[/]\n"
+                )
+                if Prompt.ask("Add it?", choices=["y", "n"], default="y") == "y":
+                    ok, message = claude_config.install_statusline()
+                    tui.console.print(f"[{'green' if ok else 'red'}]{message}[/]")
+                    if ok:
+                        tui.console.print("[dim]Restart Claude Code to pick it up.[/]")
+                else:
+                    tui.console.print("[yellow]Nothing changed.[/]")
+                input("\nPress Enter to return...")
+                continue
+
             if installed:
                 tui.console.print("[green]Already installed.[/]")
+                tui.console.print(
+                    f"[dim]Refreshing every {report['refresh_interval']}s while a Claude Code "
+                    "session is open.[/]")
                 if limits and (limits.get("five_hour") or limits.get("seven_day")):
                     tui.console.print("[dim]Real plan limits are showing in Option 2.[/]")
                 elif limits and limits.get("available") is False:

@@ -236,10 +236,13 @@ Qué hace la opción:
 
 Después de instalarlo hay que **reiniciar Claude Code**: lee `settings.json` al arrancar.
 
+La instalación incluye `refreshInterval: 30`, así que mientras tengas una sesión de Claude Code abierta el número se actualiza solo cada 30 segundos. No cuesta nada (el script es local, sin red ni tokens) y solo corre mientras hay sesión abierta — sin actividad, no se ejecuta nada.
+
 **Limitaciones honestas:**
 
 - **No hay "tokens restantes".** Claude entrega solo `used_percentage` y `resets_at`. No existe ningún campo con cantidades absolutas de tokens, así que ese número no se puede mostrar.
 - **El dato puede estar viejo.** El cache solo se refresca mientras una sesión de Claude Code dibuja su status line. La app muestra hace cuánto se capturó, y el widget marca con `?` una lectura de más de 5 minutos.
+- **Nada lo refresca si no usas Claude Code.** Si trabajas solo en Claude Desktop, tus porcentajes sí suben en el servidor (los límites son de cuenta, no de cliente), pero nadie actualiza la copia local hasta que abras Claude Code. Se midió que `claude -p` **no** renderiza status line, así que un cron alrededor de eso gastaría cuota y no refrescaría nada.
 - **No aplica a todo el mundo.** Con API key, Bedrock o Vertex, Claude Code informa `rate_limits_available: false` y no hay porcentaje que mostrar. La app lo dice en vez de inventar uno.
 
 Si algo no funciona, vuelve a entrar a la Opción 7: diagnostica la instalación (ruta con espacios sin comillas, venv borrado, repo movido) y te ofrece repararla.

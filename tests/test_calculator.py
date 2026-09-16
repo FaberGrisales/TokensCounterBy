@@ -1426,6 +1426,33 @@ class TestStatuslineDiagnostics(unittest.TestCase):
         problems = claude_config.statusline_status_report()["problems"]
         self.assertTrue(any("no longer exists" in p for p in problems), problems)
 
+    def test_install_sets_a_refresh_interval(self):
+        """
+        Without it the status line only re-runs on Claude Code's own events,
+        so the captured plan percentage drifts stale mid-session. It costs
+        nothing - the script is local and stdlib-only - and it is inherently
+        activity-gated, since Claude Code runs it only while a session is open.
+        """
+        path = os.path.join(self.tmp, "settings.json")
+        ok, _ = claude_config.install_statusline(path)
+        self.assertTrue(ok)
+        with open(path) as f:
+            written = json.load(f)["statusLine"]
+        self.assertEqual(written["refreshInterval"],
+                         claude_config.STATUSLINE_REFRESH_SECONDS)
+
+    def test_refresh_interval_is_in_seconds_and_at_least_one(self):
+        """Claude Code's schema is seconds with a minimum of 1; ms would be a 30ms loop."""
+        self.assertGreaterEqual(claude_config.STATUSLINE_REFRESH_SECONDS, 1)
+        self.assertLess(claude_config.STATUSLINE_REFRESH_SECONDS, 3600)
+
+    def test_report_surfaces_a_missing_refresh_interval(self):
+        """An install predating the setting still works - it's reported, not a problem."""
+        self._set(claude_config.statusline_command())
+        report = claude_config.statusline_status_report()
+        self.assertIsNone(report["refresh_interval"])
+        self.assertEqual(report["problems"], [])
+
     def test_a_correct_command_reports_no_problems(self):
         self._set(claude_config.statusline_command())
         report = claude_config.statusline_status_report()
