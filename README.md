@@ -4,7 +4,7 @@ Un visualizador de terminal (TUI) del uso y costo real de **Claude Code** en tu 
 
 Esta app **no hace llamadas a ninguna API** y **no necesita ninguna clave**. Todo lo que muestra viene de leer los transcripts y archivos de configuración que **Claude Code ya guarda localmente** en tu máquina (`~/.claude/projects`, `~/.claude.json`, `.mcp.json`, `.claude/settings.json`). No hay modo simulado/estimado, ni mecánicas de juego, ni nada que se conecte a internet por su cuenta.
 
-Las Opciones 1-4 son de solo lectura. La única excepción es la Opción 5 (Cleanup), que sí puede borrar archivos reales — siempre con confirmación explícita, nunca automático (ver sección de abajo).
+Las Opciones 1-4 y 6 son de solo lectura. Hay dos excepciones, y las dos piden confirmación explícita antes de tocar nada: la **Opción 5** (Cleanup), que puede **borrar** transcripts de sesiones viejas, y la **Opción 7** (Real Plan Limits), que **escribe** una clave en tu `~/.claude/settings.json` (con copia de seguridad previa) para capturar tus límites reales.
 
 ---
 
@@ -73,9 +73,22 @@ Una vez iniciado, verás el menú principal con las siguientes opciones:
 3. **Claude Code Config (MCP & Hooks)**: Qué servidores MCP y qué hooks tienes configurados para este proyecto, inspirado en los comandos `/mcp` y `/hooks` (ver sección de abajo).
 4. **Session Breakdown**: Elegís una sesión y ves, subagente por subagente y **llamada MCP por llamada MCP**, exactamente cuántos tokens/cuánto costó cada invocación individual (ver sección de abajo).
 5. **Cleanup Inactive Sessions**: Borra permanentemente sesiones locales sin actividad hace 7+ días, con selección manual y confirmación explícita (ver sección de abajo).
-6. **Floating Monitor**: Abre una ventana pequeña que se queda **encima de las demás ventanas**, con el consumo en vivo, para verlo mientras trabajas en otra aplicación (ver sección de abajo).
+6. **Floating Monitor**: Abre una ventana pequeña que se queda **encima de las demás ventanas**, con el consumo en vivo, para verlo mientras trabajas en otra aplicación. Para ver tu porcentaje real de plan, activa antes la Opción 7 (ver sección de abajo).
 7. **Enable Real Plan Limits**: Activa la captura de tus porcentajes reales de límite de plan (5h y 7 días) desde Claude Code (ver sección de abajo).
 8. **Exit**: Cierra la aplicación.
+
+### 🧭 Primeros pasos (recomendado)
+
+La primera vez que uses la app, en este orden:
+
+1. **Opción 7 — Enable Real Plan Limits.** Instala un pequeño script en tu status line de Claude Code que captura tus porcentajes reales de límite (5h y 7 días). Te muestra exactamente qué va a escribir y te pide confirmación.
+2. **Reinicia Claude Code.** Lee su configuración solo al arrancar, así que sin reiniciar el script no se ejecuta.
+3. **Usa Claude Code un momento** (cualquier sesión). La primera lectura llega cuando Claude Code dibuja su status line.
+4. **Opción 2 o Opción 6.** Ahí ya verás tus porcentajes reales en vez del gasto total.
+
+Si en el paso 4 sigues viendo solo dólares, vuelve a la Opción 7: diagnostica qué está mal y te ofrece repararlo.
+
+Todo lo demás (Opciones 1, 3, 4 y 5) funciona desde el primer momento sin configurar nada.
 
 Los precios por modelo de Claude viven en `tokens_counter/models_config.json` (editable a mano) — de ahí sale el costo que ves en las Opciones 1 y 2.
 
@@ -87,7 +100,7 @@ Muestra en tiempo real todas las sesiones de **Claude Code** activas o recientes
 
 Cómo funciona: Claude Code guarda automáticamente un transcript local por sesión en `~/.claude/projects/<proyecto>/<session-id>.jsonl` (y uno adicional por cada subagente/workflow que lances dentro de esa sesión). Esta opción lee esos archivos localmente — nunca sale nada de tu computador — y extrae **solo** metadatos de uso (modelo, tokens de entrada/salida/caché, timestamp); nunca lee ni muestra el contenido de tus prompts o respuestas.
 
-Al entrar verás una tabla que se refresca sola cada pocos segundos con:
+Al entrar verás una tabla que se refresca sola **cada 2 segundos** con:
 
 - **Status**: `● LIVE` si la sesión tuvo actividad en los últimos 5 minutos, `○ idle` si no.
 - **Reqs**: número de turnos de la conversación principal, más cuántos subagentes/workflows lanzó (su consumo se suma al total de la sesión).
@@ -96,6 +109,16 @@ Al entrar verás una tabla que se refresca sola cada pocos segundos con:
 - **Context**: barra de color con el porcentaje de la ventana de contexto del modelo que está ocupando la conversación en este momento (lo mismo que muestra `/context` dentro de Claude Code). Se calcula con los tokens del último mensaje (input + cache read + cache write) contra el `context_window` del modelo en `models_config.json`. Verde por debajo de 50%, amarillo hasta 80%, rojo por encima.
 
 Presiona **Ctrl+C** para detener el monitor y volver al menú.
+
+**Se adapta al tamaño de tu terminal.** Si la achicas, la vista cambia sola en el siguiente refresco en vez de volverse ilegible:
+
+| Ancho de la terminal | Qué ves |
+|---|---|
+| 100 columnas o más | La tabla completa, con todas las columnas de arriba |
+| Entre 50 y 99 | Tabla compacta: estado, proyecto, tokens, costo y contexto |
+| Menos de 50 | Una lista con cada sesión en dos líneas cortas |
+
+En los modos angostos los números se abrevian (`933.1K`, `1.2M`), y un costo menor a un centavo sale como `<$0.01`, nunca como `$0.00` (que se leería como "gratis").
 
 **Notas:**
 - El costo se calcula con las tarifas de `tokens_counter/models_config.json`. Si una sesión usa un modelo que no está en esa tabla, su costo se muestra como `N/A` (los tokens sí se cuentan). Puedes agregar o ajustar precios editando ese archivo directamente.
@@ -108,7 +131,7 @@ Presiona **Ctrl+C** para detener el monitor y volver al menú.
 
 Claude Code tiene su propio comando `/usage`, que muestra el costo y el desglose de tokens **de la sesión actual** ("Usage by model": tokens de entrada/salida/caché y costo por modelo — ver la [documentación oficial](https://code.claude.com/docs/en/costs#using-the-usage-command)). Esta opción hace lo mismo pero para **todas** las sesiones locales que encuentre en tu máquina, no solo la que tienes abierta, y además le agrega el estado de tu suscripción.
 
-**Se refresca sola** cada pocos segundos (igual que el Live Session Monitor) — no necesitas salir y volver a entrar para ver los minutos/porcentajes actualizados. Presiona **Ctrl+C** para detenerla y volver al menú.
+**Se refresca sola** cada 5 segundos — no necesitas salir y volver a entrar para ver los minutos/porcentajes actualizados. Presiona **Ctrl+C** para detenerla y volver al menú.
 
 Contenido:
 
@@ -117,13 +140,17 @@ Contenido:
 - **Time-in-Window %**: para cada ventana (5h y 7 días), busca la petición real **más antigua que todavía sigue dentro** de esa ventana y muestra hace cuánto ocurrió: a qué hora (local, "Window Started") y cuánto tiempo lleva ahí ("Time Elapsed"), como un **% del tiempo total de la ventana**. Este % crece mientras sigues usando Claude Code de forma continua, y baja de nuevo cuando esa actividad antigua finalmente sale de la ventana sin que haya nada más reciente que la reemplace. Si la ventana está vacía (no has usado Claude Code en ese período), lo dice explícitamente en vez de inventar un número.
   - **Importante sobre el "%"**: es un **% de cuánto tiempo de la ventana está ocupado por actividad real tuya**, **no** el % de tu cuota de plan gastada — este dato no es lo mismo que "cuántos tokens/mensajes te quedan", solo cuánto tiempo real llevas usando Claude Code dentro de esa ventana. El título de la tabla y una nota de una línea debajo lo dejan explícito, precisamente porque comparar este % contra el "% used" real que muestra Claude Code (calculado en su servidor contra tu cuota de plan) es un error fácil de cometer si no se aclara.
   - El % se muestra con 2 decimales y el tiempo transcurrido incluye segundos (ej. `2h 14m 08s`) para que veas el avance en cada refresco de 5 segundos, en vez de que parezca congelado por minutos.
+  - **Window Ends**: cuándo esa petición más antigua sale de la ventana ("Window Started" + 5 horas, o + 7 días), con una cuenta regresiva debajo (`in 1h14m`). Ojo: **no es un reinicio de cuota**. Cuando llega esa hora, la ventana simplemente pasa a medirse desde la siguiente petición más antigua.
+- **Plan Limit Used (real)**: el porcentaje **real** de tu límite de plan de 5 horas y de 7 días, con la hora exacta en que Claude lo reinicia (`resets Sep 15 00:50`). Estos sí son los números de Anthropic, los mismos que ves en `/usage`. **Requiere haber activado la Opción 7** — sin ella la columna no aparece. Debajo de la tabla se indica hace cuánto se capturó la lectura, en amarillo si pasaron más de 5 minutos.
 - **Total Estimated Cost** y **Total Requests**: sumados sobre todas las sesiones detectadas.
 - **Usage by Model**: la misma idea que la lista de `/usage` (`modelo: input, output, cache read, cache write ($costo)`), pero agregada globalmente. Ordenado por costo, muestra hasta 8 modelos con una fila "+N more" si hay más (para que la vista en vivo no crezca más que una terminal típica).
 - **By Project**: desglose adicional por carpeta de proyecto (esto no existe en `/usage`, pero como esta app ve todas las sesiones a la vez, tiene sentido mostrarlo). También limitado a 8 filas con "+N more" si aplica.
 
 **Cómo calculo "Time-in-Window %"**: la primera versión intentaba adivinar "cuándo empezó tu sesión" buscando huecos de inactividad — engañoso, porque cualquier pausa de 5+ horas hacía que pareciera "recién empezada". Una segunda versión anclaba a tu petición **más reciente** y hacía una cuenta regresiva hasta que esa petición saliera de la ventana — matemáticamente correcto, pero como cada mensaje nuevo empuja ese momento hacia adelante, mientras estás trabajando activamente la cuenta regresiva nunca bajaba (parecía congelada). Esta versión ancla a tu petición **más antigua que sigue dentro de la ventana** y mide cuánto tiempo lleva ahí — así el tiempo/porcentaje crece de forma continua con tu uso real, sin reiniciarse en cada mensaje.
 
-**Limitación honesta:** esta opción **no** puede mostrar el porcentaje exacto de tu límite de plan usado ni la hora exacta de reinicio que calcula Anthropic en su servidor contra una cuota por tier que no es pública. Investigué a fondo (`~/.claude.json`, `~/.claude/.credentials.json`, `~/.claude/policy-limits.json`) y confirmé que ese % y esa cuota no quedan cacheados en ningún archivo local. "Time-in-Window %" es lo más cercano y honesto que puedo calcular con datos 100% locales; solo el comando real `/usage` dentro de Claude Code puede mostrarte el % y reinicio autoritativos de tu plan.
+**Sobre el porcentaje real de tu plan:** Anthropic lo calcula en su servidor contra una cuota por tier que no es pública, y no queda guardado en ningún archivo local (se revisaron `~/.claude.json`, `~/.claude/.credentials.json` y `~/.claude/policy-limits.json`). Por eso esta app no puede leerlo directamente de tus archivos. Lo que sí puede hacer es recibirlo de Claude Code a través de su status line — eso es lo que activa la **Opción 7**, y es de donde sale la columna **Plan Limit Used (real)**.
+
+Sin la Opción 7, lo más honesto que la app puede calcular con datos 100% locales es "Time-in-Window %" y "Window Ends" — útiles, pero **ninguno de los dos es tu cuota**.
 
 ### Tu propio presupuesto (columna "vs Your Budget")
 
@@ -200,9 +227,41 @@ Cómo funciona:
 
 ## 📌 Floating Monitor (Opción 6)
 
-Una ventana pequeña (330×210) que se mantiene **siempre encima** del resto de ventanas, con el mismo consumo en vivo de la Opción 1: por sesión, si está activa, cuántos tokens lleva, cuánto cuesta y qué porcentaje de la ventana de contexto ocupa. Se refresca sola cada 3 segundos.
+> **Antes de usarla por primera vez, activa la Opción 7.** Sin ella la ventana funciona, pero en el encabezado solo verás tu gasto total en dólares en lugar del porcentaje real de tu plan. Ver [primeros pasos](#-primeros-pasos-recomendado) más arriba.
 
-La idea es dejarla en una esquina y seguir trabajando en el navegador o el editor sin perder de vista el gasto.
+Una ventana pequeña (400×210) que se mantiene **siempre encima** del resto de ventanas, para dejarla en una esquina y seguir trabajando en el navegador o el editor sin perder de vista tu consumo. Se refresca sola cada 3 segundos.
+
+```
+● 1 live   ○ 6 idle             │  5h 43% · resets 1h14m
+● TokensCounterBy    120.1K    $10.37   18%
+○ 916-app            933.1K   $242.63   61%
+```
+
+**El encabezado** muestra, a la derecha del separador, lo mejor que haya disponible:
+
+| Si… | Muestra |
+|---|---|
+| Activaste la Opción 7 y tu plan tiene límites | `5h 43% · resets 1h14m` — el porcentaje **real** de tu límite de 5 horas y cuánto falta para que se reinicie |
+| No, pero configuraste un presupuesto propio | `5h 64%` — tu consumo contra **tu** límite (ver Opción 2) |
+| Ninguna de las dos | `$1,299.99` — tu gasto total |
+
+Si la lectura del plan tiene más de 5 minutos, sale con `?` (`5h 43%?`): el número no se actualiza mientras no haya una sesión de Claude Code abierta.
+
+**Las filas** priorizan Claude Code sobre Claude Desktop:
+
+- **Hay alguna sesión de Claude Code activa** → una fila por sesión con tokens, costo y porcentaje de ventana de contexto.
+- **No hay ninguna, pero usaste Claude Desktop en los últimos 5 minutos** → la ventana cambia a la vista de Desktop:
+
+  ```
+  ● Claude Desktop                 │  5h 43% · resets 1h14m
+  Claude Desktop · active 2m ago
+  Desktop keeps no per-session token data. The 5h % above
+  covers your whole account, including Desktop.
+  ```
+
+  Desktop solo puede decir **que lo estás usando**, nunca tokens ni costo: no guarda consumo por conversación en ningún archivo local. El porcentaje del encabezado sí incluye tu uso de Desktop, porque el límite es de toda la cuenta — pero solo está tan fresco como la última sesión de Claude Code que lo actualizó.
+
+Controles:
 
 - **Click** sobre la ventana: alterna entre "siempre encima" y ventana normal.
 - **Esc** o la X: la cierra y vuelve al menú.
@@ -247,6 +306,16 @@ La instalación incluye `refreshInterval: 30`, así que mientras tengas una sesi
 
 Si algo no funciona, vuelve a entrar a la Opción 7: diagnostica la instalación (ruta con espacios sin comillas, venv borrado, repo movido) y te ofrece repararla.
 
+**Dónde queda cada cosa** (por si quieres revisarlo o desinstalarlo):
+
+| Qué | Dónde |
+|---|---|
+| Configuración que se agrega | Clave `statusLine` en `~/.claude/settings.json` |
+| Copia de seguridad previa | `~/.claude/settings.json.bak-tokenscounter` |
+| Lecturas capturadas | Linux `~/.cache/tokenscounterby/` · macOS `~/Library/Caches/TokensCounterBy/` · Windows `%LOCALAPPDATA%\TokensCounterBy\` |
+
+Para desinstalarlo, borra la clave `statusLine` de `~/.claude/settings.json` (o restaura la copia de seguridad) y reinicia Claude Code. La carpeta de lecturas se puede borrar sin problema. Si necesitas guardarlas en otro lugar, define la variable de entorno `TOKENS_COUNTER_CACHE` con la ruta del archivo.
+
 ---
 
 ## 🧪 Tests
@@ -255,4 +324,4 @@ Si algo no funciona, vuelve a entrar a la Opción 7: diagnostica la instalación
 python3 -m unittest tests.test_calculator
 ```
 
-Las opciones 1-4 y 6 son de solo lectura sobre los archivos locales de Claude Code. La Opción 5 es la única que borra algo.
+Las opciones 1-4 y 6 son de solo lectura sobre los archivos locales de Claude Code. La Opción 5 es la única que borra algo, y la Opción 7 la única que modifica la configuración de Claude Code (solo la clave `statusLine`, con copia de seguridad).
