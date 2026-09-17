@@ -434,3 +434,74 @@ def install_statusline(settings_path=None):
         return False, f"Could not write {path}: {e}"
 
     return True, f"Status line installed in {path} (previous file saved as settings.json.bak-tokenscounter)."
+
+
+# Subdirectories of the Claude Desktop profile that a conversation writes to.
+# Deliberately NOT the whole profile: Cache/, GPUCache/, Code Cache/ and the
+# bundled claude-code/ binary change for reasons unrelated to anyone chatting
+# (GPU shader compiles, updates), and would make an idle, merely-open app look
+# active.
+DESKTOP_ACTIVITY_SUBDIRS = ("IndexedDB", "Local Storage", "Session Storage", "WebStorage")
+
+
+def claude_desktop_dir():
+    """Claude Desktop's profile directory for this platform (it may not exist)."""
+    import sys
+    if sys.platform == "win32":
+        base = os.environ.get("APPDATA") or os.path.expanduser("~\\AppData\\Roaming")
+        return os.path.join(base, "Claude")
+    if sys.platform == "darwin":
+        return os.path.expanduser("~/Library/Application Support/Claude")
+    base = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+    return os.path.join(base, "Claude")
+
+
+def get_desktop_activity(desktop_dir=None, now=None, active_seconds=None):
+    """
+    Whether Claude Desktop has been used recently - ACTIVITY ONLY, no usage.
+
+    Claude Desktop keeps no per-session token or cost data anywhere on disk
+    (investigated and ruled out: its conversations live server-side and its
+    local store carries no usage fields). So the only honest thing to report
+    about it is *that* it is being used and when, taken from the newest mtime
+    under the storage directories a conversation writes to. Anything more -
+    tokens, cost, a per-chat breakdown - would be invented.
+
+    Returns None when Desktop isn't installed (no profile directory), else a
+    dict with `last_activity_at` (datetime or None), `age_seconds` and
+    `is_active`. Read-only: it stats files, it never opens them.
+    """
+    import time
+    from datetime import datetime, timezone
+    from tokens_counter.session_monitor import ACTIVE_THRESHOLD_SECONDS
+
+    root = desktop_dir or claude_desktop_dir()
+    if not os.path.isdir(root):
+        return None
+
+    now = time.time() if now is None else now
+    threshold = ACTIVE_THRESHOLD_SECONDS if active_seconds is None else active_seconds
+
+    newest = None
+    for sub in DESKTOP_ACTIVITY_SUBDIRS:
+        base = os.path.join(root, sub)
+        if not os.path.isdir(base):
+            continue
+        for dirpath, _dirnames, filenames in os.walk(base):
+            for name in filenames:
+                try:
+                    mtime = os.stat(os.path.join(dirpath, name)).st_mtime
+                except OSError:
+                    continue
+                if newest is None or mtime > newest:
+                    newest = mtime
+
+    if newest is None:
+        return {"last_activity_at": None, "age_seconds": None, "is_active": False}
+
+    age = max(0.0, now - newest)
+    return {
+        "last_activity_at": datetime.fromtimestamp(newest, timezone.utc),
+        "age_seconds": age,
+        "is_active": age <= threshold,
+    }

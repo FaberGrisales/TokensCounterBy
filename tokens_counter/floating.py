@@ -211,6 +211,55 @@ def _plan_headline(config_data):
         return "", DIM
 
 
+def _desktop_status(live_code_sessions):
+    """
+    Claude Desktop's activity, but only when it should be shown at all.
+
+    Returns the activity dict when there are no live Claude Code sessions AND
+    Desktop has been used recently, else None. Claude Code is always
+    preferred: it is the only source with real per-session numbers.
+    """
+    if live_code_sessions:
+        return None
+    from tokens_counter import claude_config
+    try:
+        activity = claude_config.get_desktop_activity()
+    except Exception:
+        return None
+    return activity if activity and activity.get("is_active") else None
+
+
+def _desktop_takes_over(live_code_sessions):
+    return _desktop_status(live_code_sessions) is not None
+
+
+def _desktop_line(activity):
+    """'Claude Desktop · active 2m ago' - an activity line, never usage."""
+    age = (activity or {}).get("age_seconds")
+    if age is None:
+        return "Claude Desktop · active"
+    if age < 60:
+        return "Claude Desktop · active now"
+    return f"Claude Desktop · active {int(age // 60)}m ago"
+
+
+def _render_desktop(rows_frame, header):
+    import tkinter as tk
+    activity = _desktop_status(0)
+    header.config(text="● Claude Desktop")
+    tk.Label(rows_frame, text=_desktop_line(activity), bg=BG, fg=FG,
+             font=("sans", 8), anchor="w").pack(fill="x", pady=(2, 4))
+    # Said once, plainly, so the missing session rows don't read as a bug:
+    # Desktop stores no per-chat token data, and the percentage in the
+    # header is account-wide - it includes Desktop use, but is only as fresh
+    # as the last Claude Code session that refreshed it.
+    tk.Label(rows_frame,
+             text="Desktop keeps no per-session token data. The 5h % above "
+                  "covers your whole account, including Desktop.",
+             bg=BG, fg=DIM, font=("sans", 7), anchor="w", justify="left",
+             wraplength=360).pack(fill="x")
+
+
 def is_available():
     """True if tkinter can be imported on this machine."""
     try:
@@ -305,10 +354,18 @@ def run_floating_monitor(config_data, max_rows=5):
             return
 
         live = sum(1 for s in sessions if s["is_active"])
-        header.config(text=f"● {live} live   ○ {len(sessions) - live} idle")
-
         text, colour = _plan_headline(config_data)
         plan_label.config(text=text, fg=colour)
+
+        # Claude Code first; Claude Desktop only when no Code session is live.
+        # Code sessions carry real per-session tokens and cost, so they win
+        # whenever there is one. Desktop can only ever say THAT it's in use.
+        if _desktop_takes_over(live):
+            _render_desktop(rows_frame, header)
+            state["job"] = root.after(REFRESH_MS, refresh)
+            return
+
+        header.config(text=f"● {live} live   ○ {len(sessions) - live} idle")
 
         for s in sessions[:max_rows]:
             name = os.path.basename(s["cwd"]) if s.get("cwd") else s["project"]

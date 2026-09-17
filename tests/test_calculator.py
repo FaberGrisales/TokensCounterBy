@@ -1568,3 +1568,76 @@ class TestNewSessionDoesNotWipeTheReading(unittest.TestCase):
         finally:
             statusline.CACHE_FILE = real
         self.assertIn("?", text)
+
+
+class TestDesktopFallback(unittest.TestCase):
+    """
+    Claude Code first; Claude Desktop only when no Code session is live.
+    Desktop can only report activity - it keeps no per-session token data.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.now = time.time()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _touch(self, relative, age_seconds):
+        path = os.path.join(self.tmp, relative)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write("x")
+        os.utime(path, (self.now - age_seconds, self.now - age_seconds))
+
+    def test_not_installed_returns_none(self):
+        missing = os.path.join(self.tmp, "no-such-profile")
+        self.assertIsNone(claude_config.get_desktop_activity(missing, now=self.now))
+
+    def test_recent_conversation_storage_counts_as_active(self):
+        self._touch("IndexedDB/https_claude.ai_0.indexeddb.leveldb/000003.log", 60)
+        activity = claude_config.get_desktop_activity(self.tmp, now=self.now)
+        self.assertTrue(activity["is_active"])
+        self.assertAlmostEqual(activity["age_seconds"], 60, delta=2)
+
+    def test_old_activity_is_not_active(self):
+        self._touch("Local Storage/leveldb/000005.log", 3600)
+        self.assertFalse(claude_config.get_desktop_activity(self.tmp, now=self.now)["is_active"])
+
+    def test_cache_churn_does_not_fake_activity(self):
+        """
+        GPU shader caches and the bundled claude-code binary change without
+        anyone chatting. Counting them would make an idle, merely-open app
+        look active.
+        """
+        self._touch("GPUCache/data_1", 5)
+        self._touch("Cache/Cache_Data/abc", 5)
+        self._touch("claude-code/2.1.266/claude", 5)
+        self._touch("IndexedDB/https_claude.ai_0.indexeddb.leveldb/000003.log", 7200)
+        self.assertFalse(claude_config.get_desktop_activity(self.tmp, now=self.now)["is_active"])
+
+    def test_live_claude_code_sessions_always_win(self):
+        """Code carries real per-session numbers; Desktop never displaces it."""
+        self._touch("IndexedDB/x.log", 1)
+        real = claude_config.claude_desktop_dir
+        try:
+            claude_config.claude_desktop_dir = lambda: self.tmp
+            self.assertFalse(floating._desktop_takes_over(2))
+            self.assertTrue(floating._desktop_takes_over(0))
+        finally:
+            claude_config.claude_desktop_dir = real
+
+    def test_idle_desktop_does_not_take_over(self):
+        self._touch("IndexedDB/x.log", 7200)
+        real = claude_config.claude_desktop_dir
+        try:
+            claude_config.claude_desktop_dir = lambda: self.tmp
+            self.assertFalse(floating._desktop_takes_over(0))
+        finally:
+            claude_config.claude_desktop_dir = real
+
+    def test_desktop_line_reports_activity_not_usage(self):
+        line = floating._desktop_line({"age_seconds": 150})
+        self.assertEqual(line, "Claude Desktop · active 2m ago")
+        for word in ("token", "$", "%"):
+            self.assertNotIn(word, line)
