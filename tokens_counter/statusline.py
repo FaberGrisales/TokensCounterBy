@@ -121,6 +121,61 @@ def _usable(entry):
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
+def _reset_epoch(value):
+    """
+    `resets_at` as epoch seconds for comparison, or None.
+
+    Claude sends an integer Unix timestamp; ISO strings are accepted too.
+    Kept local and stdlib-only: this script runs standalone from Claude Code,
+    where the app's own modules may not be importable.
+    """
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value) / 1000.0 if value > 1e11 else float(value)
+    if isinstance(value, str) and value:
+        try:
+            text = value[:-1] + "+00:00" if value.endswith("Z") else value
+            parsed = datetime.fromisoformat(text)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed.timestamp()
+        except ValueError:
+            return None
+    return None
+
+
+def _is_stale_snapshot(incoming, previous):
+    """
+    True when `incoming` is an older view of the same window than `previous`.
+
+    Every open Claude Code process holds its own in-memory copy of the rate
+    limits, from whenever IT last heard from the server, and with
+    refreshInterval every one of them rewrites this cache on a timer. An idle
+    session therefore keeps pushing a reading from hours ago - observed live
+    as the 5h figure flipping 83% -> 82% -> 83% every few seconds, and as a
+    lingering "43%" from a session untouched since usage was at 43%.
+
+    Two facts decide it without any clock on the snapshot itself:
+      - a window that resets EARLIER than the one we hold is an older window;
+      - within the SAME window, usage only ever goes up until the reset, so a
+        lower percentage can only be an older snapshot.
+    A later reset is a genuinely new window and is always accepted, even at a
+    lower percentage. When either reset time is unknown there's nothing safe
+    to compare, and the incoming value wins as before.
+    """
+    new_reset = _reset_epoch(incoming.get("resets_at"))
+    old_reset = _reset_epoch(previous.get("resets_at"))
+    if new_reset is None or old_reset is None:
+        return False
+    # Claude reports whole seconds; allow a little jitter between processes.
+    if new_reset < old_reset - 60:
+        return True
+    if abs(new_reset - old_reset) <= 60:
+        return incoming["used_percentage"] < previous["used_percentage"]
+    return False
+
+
 def _merge_with_previous(rate_limits, captured_at):
     """
     Stamp each fresh window, and carry the last good one forward when Claude
@@ -144,10 +199,15 @@ def _merge_with_previous(rate_limits, captured_at):
     merged = {}
     for window in set(incoming) | set(previous):
         entry = incoming.get(window)
-        if _usable(entry):
+        prior = previous.get(window)
+        if _usable(entry) and _usable(prior) and _is_stale_snapshot(entry, prior):
+            # Another, fresher session already reported this window. Keep its
+            # reading - with its own captured_at, so it still ages honestly.
+            merged[window] = prior
+        elif _usable(entry):
             merged[window] = {**entry, "captured_at": captured_at}
-        elif _usable(previous.get(window)):
-            merged[window] = previous[window]
+        elif _usable(prior):
+            merged[window] = prior
     return merged or None
 
 

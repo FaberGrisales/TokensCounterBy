@@ -1641,3 +1641,112 @@ class TestDesktopFallback(unittest.TestCase):
         self.assertEqual(line, "Claude Desktop · active 2m ago")
         for word in ("token", "$", "%"):
             self.assertNotIn(word, line)
+
+
+class TestStaleSnapshotsFromOtherSessions(unittest.TestCase):
+    """
+    Every open Claude Code process holds its own copy of the rate limits and,
+    with refreshInterval, rewrites the cache on a timer. An idle session kept
+    pushing an old reading: observed live as 83% -> 82% -> 83% flicker, and
+    as a lingering "43%" from a session untouched since usage was at 43%.
+    """
+
+    WINDOW = 1789618800
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.cache = os.path.join(self.tmp, "rate_limits_cache.json")
+        self.script = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "tokens_counter", "statusline.py")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _render(self, percent, resets_at="same"):
+        import subprocess
+        five = {"used_percentage": percent}
+        if resets_at == "same":
+            five["resets_at"] = self.WINDOW
+        elif resets_at is not None:
+            five["resets_at"] = resets_at
+        subprocess.run([sys.executable, self.script],
+                       input=json.dumps({"rate_limits": {"five_hour": five}}),
+                       capture_output=True, text=True, timeout=30,
+                       env={**os.environ, "TOKENS_COUNTER_CACHE": self.cache})
+        with open(self.cache) as f:
+            return json.load(f)["rate_limits"]["five_hour"]
+
+    def test_an_older_snapshot_of_the_same_window_cannot_lower_the_reading(self):
+        self._render(83)
+        self.assertEqual(self._render(43)["used_percentage"], 83)
+        self.assertEqual(self._render(82)["used_percentage"], 83)
+
+    def test_real_growth_in_the_same_window_is_accepted(self):
+        self._render(83)
+        self.assertEqual(self._render(85)["used_percentage"], 85)
+
+    def test_a_new_window_after_a_reset_is_accepted_even_when_lower(self):
+        """A reset legitimately drops usage; refusing it would freeze the old number."""
+        self._render(85)
+        self.assertEqual(self._render(3, resets_at=self.WINDOW + 18000)["used_percentage"], 3)
+
+    def test_a_session_still_on_the_previous_window_cannot_undo_a_reset(self):
+        self._render(3, resets_at=self.WINDOW + 18000)
+        self.assertEqual(self._render(85, resets_at=self.WINDOW)["used_percentage"], 3)
+
+    def test_a_rejected_snapshot_does_not_refresh_the_kept_readings_age(self):
+        """Keeping the fresher value must not make it look newer than it is."""
+        kept = self._render(83)
+        time.sleep(0.05)
+        after = self._render(43)
+        self.assertEqual(after["captured_at"], kept["captured_at"])
+
+    def test_without_reset_times_the_incoming_value_still_wins(self):
+        """Nothing safe to compare - fall back to the previous behaviour."""
+        self._render(83, resets_at=None)
+        self.assertEqual(self._render(43, resets_at=None)["used_percentage"], 43)
+
+
+class TestWidgetSnapshot(unittest.TestCase):
+    """
+    _collect_snapshot runs off the UI thread. Reading every transcript on the
+    window's own thread froze it for up to ~0.8s every refresh (measured).
+    """
+
+    def setUp(self):
+        self.real = session_monitor.get_all_sessions
+
+    def tearDown(self):
+        session_monitor.get_all_sessions = self.real
+
+    def test_does_not_import_or_touch_tkinter(self):
+        """tkinter is not thread-safe; the worker may only compute plain data."""
+        import inspect
+        self.assertNotIn("tk.", inspect.getsource(floating._collect_snapshot))
+
+    def test_a_read_failure_is_reported_not_raised(self):
+        def boom(_cfg):
+            raise OSError("disk went away")
+        session_monitor.get_all_sessions = boom
+        snapshot = floating._collect_snapshot(load_config())
+        self.assertIn("disk went away", snapshot["error"])
+        self.assertIsNone(snapshot["sessions"])
+
+    def test_transcripts_are_scanned_once_per_refresh(self):
+        """The headline's spend fallback reuses the loaded sessions instead of rescanning."""
+        calls = []
+        def counting(cfg):
+            calls.append(1)
+            return []
+        session_monitor.get_all_sessions = counting
+        from tokens_counter import statusline
+        real_cache = statusline.CACHE_FILE
+        tmp = tempfile.mkdtemp()
+        try:
+            statusline.CACHE_FILE = os.path.join(tmp, "none.json")   # force the fallback
+            floating._collect_snapshot(load_config())
+        finally:
+            statusline.CACHE_FILE = real_cache
+            shutil.rmtree(tmp, ignore_errors=True)
+        self.assertEqual(len(calls), 1)

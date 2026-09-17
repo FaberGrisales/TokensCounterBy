@@ -23,6 +23,10 @@ import os
 
 REFRESH_MS = 3000
 
+# How often the UI thread checks whether a background read has finished.
+# Short enough to feel instant, long enough to cost nothing.
+POLL_MS = 150
+
 # A plan-limit reading older than this is flagged rather than shown as
 # current: the status line only rewrites its cache while a Claude Code
 # session is rendering, so an idle machine's number ages silently.
@@ -142,7 +146,7 @@ def _time_until(resets_at):
     return f"{days}d{hours}h" if hours else f"{days}d"
 
 
-def _plan_headline(config_data):
+def _plan_headline(config_data, sessions=None):
     """
     What to show beside the live/idle counts: Claude's real 5h plan-limit
     percentage when it's available, else a fallback.
@@ -204,8 +208,9 @@ def _plan_headline(config_data):
         pass
 
     try:
-        total = sum(s["cost"] for s in session_monitor.get_all_sessions(config_data)
-                    if s["cost"] is not None)
+        if sessions is None:
+            sessions = session_monitor.get_all_sessions(config_data)
+        total = sum(s["cost"] for s in sessions if s["cost"] is not None)
         return _fmt_cost(total), ACCENT
     except Exception:
         return "", DIM
@@ -243,9 +248,8 @@ def _desktop_line(activity):
     return f"Claude Desktop · active {int(age // 60)}m ago"
 
 
-def _render_desktop(rows_frame, header):
+def _render_desktop(rows_frame, header, activity):
     import tkinter as tk
-    activity = _desktop_status(0)
     header.config(text="● Claude Desktop")
     tk.Label(rows_frame, text=_desktop_line(activity), bg=BG, fg=FG,
              font=("sans", 8), anchor="w").pack(fill="x", pady=(2, 4))
@@ -258,6 +262,42 @@ def _render_desktop(rows_frame, header):
                   "covers your whole account, including Desktop.",
              bg=BG, fg=DIM, font=("sans", 7), anchor="w", justify="left",
              wraplength=360).pack(fill="x")
+
+
+def _collect_snapshot(config_data):
+    """
+    Everything one refresh needs, gathered WITHOUT touching tkinter.
+
+    This runs on a worker thread. Reading every transcript takes the better
+    part of a second on a real machine (~0.6s measured), and the headline's
+    budget fallback can add ~1.4s more; doing that on the window's own thread
+    froze it - no redraw, no click, no Esc - for the whole read, every
+    refresh. tkinter is not thread-safe, so the worker only computes plain
+    data and the UI thread does all the drawing.
+
+    Returns a dict: `sessions`, `live`, `headline` (text, colour), `desktop`
+    (activity dict when the Desktop view should replace the rows, else None),
+    and `error` (a message when the read failed, else None).
+    """
+    from tokens_counter import session_monitor
+    try:
+        sessions = session_monitor.get_all_sessions(config_data)
+    except Exception as e:
+        return {"sessions": None, "live": 0, "headline": None, "desktop": None,
+                "error": str(e)}
+
+    live = sum(1 for s in sessions if s["is_active"])
+    try:
+        headline = _plan_headline(config_data, sessions)
+    except Exception:
+        headline = None
+    return {
+        "sessions": sessions,
+        "live": live,
+        "headline": headline,
+        "desktop": _desktop_status(live),
+        "error": None,
+    }
 
 
 def is_available():
@@ -284,6 +324,8 @@ def run_floating_monitor(config_data, max_rows=5):
         import tkinter as tk
     except Exception as e:
         return False, f"tkinter is not available: {e}"
+    import queue
+    import threading
 
     from tokens_counter import session_monitor
 
@@ -319,7 +361,9 @@ def run_floating_monitor(config_data, max_rows=5):
     footer = tk.Label(root, bg=BG, fg=DIM, font=("sans", 7), anchor="w")
     footer.pack(fill="x", padx=10, pady=(0, 6))
 
-    state = {"on_top": True, "job": None}
+    state = {"on_top": True, "job": None, "worker": None,
+             "closed": False, "rendered": False}
+    results = queue.Queue()
 
     def toggle_on_top(_event=None):
         """Let the user drop the window behind others without closing it."""
@@ -332,6 +376,7 @@ def run_floating_monitor(config_data, max_rows=5):
         footer.config(text=f"click: toggle {mark} · Esc: close · refreshes every 3s")
 
     def close(_event=None):
+        state["closed"] = True
         if state["job"] is not None:
             try:
                 root.after_cancel(state["job"])
@@ -339,32 +384,35 @@ def run_floating_monitor(config_data, max_rows=5):
                 pass
         root.destroy()
 
-    def refresh():
-        for child in rows_frame.winfo_children():
-            child.destroy()
-
-        try:
-            sessions = session_monitor.get_all_sessions(config_data)
-        except Exception as e:
-            # Same contract as the rest of the app: a read failure degrades
-            # to a visible message, it never takes the window down.
-            tk.Label(rows_frame, text=f"read error: {e}", bg=BG, fg=DIM,
-                     font=("sans", 8), anchor="w", wraplength=300).pack(fill="x")
-            state["job"] = root.after(REFRESH_MS, refresh)
+    def render(snapshot):
+        """Draw a snapshot. UI thread only."""
+        if snapshot["error"]:
+            # Keep the last good view on screen rather than blanking it; only
+            # say something when there has never been anything to show.
+            if not state["rendered"]:
+                for child in rows_frame.winfo_children():
+                    child.destroy()
+                tk.Label(rows_frame, text=f"read error: {snapshot['error']}", bg=BG,
+                         fg=DIM, font=("sans", 8), anchor="w",
+                         wraplength=360).pack(fill="x")
             return
 
-        live = sum(1 for s in sessions if s["is_active"])
-        text, colour = _plan_headline(config_data)
-        plan_label.config(text=text, fg=colour)
+        if snapshot["headline"]:
+            text, colour = snapshot["headline"]
+            plan_label.config(text=text, fg=colour)
+
+        for child in rows_frame.winfo_children():
+            child.destroy()
 
         # Claude Code first; Claude Desktop only when no Code session is live.
         # Code sessions carry real per-session tokens and cost, so they win
         # whenever there is one. Desktop can only ever say THAT it's in use.
-        if _desktop_takes_over(live):
-            _render_desktop(rows_frame, header)
-            state["job"] = root.after(REFRESH_MS, refresh)
+        if snapshot["desktop"]:
+            _render_desktop(rows_frame, header, snapshot["desktop"])
+            state["rendered"] = True
             return
 
+        sessions, live = snapshot["sessions"], snapshot["live"]
         header.config(text=f"● {live} live   ○ {len(sessions) - live} idle")
 
         for s in sessions[:max_rows]:
@@ -391,7 +439,29 @@ def run_floating_monitor(config_data, max_rows=5):
         if not sessions:
             tk.Label(rows_frame, text="No local Claude Code sessions found.", bg=BG,
                      fg=DIM, font=("sans", 8), anchor="w").pack(fill="x")
+        state["rendered"] = True
 
+    def refresh():
+        """Start a background read; the previous view stays up meanwhile."""
+        if state["closed"]:
+            return
+        if state["worker"] is None or not state["worker"].is_alive():
+            def work():
+                results.put(_collect_snapshot(config_data))
+            state["worker"] = threading.Thread(target=work, daemon=True)
+            state["worker"].start()
+        state["job"] = root.after(POLL_MS, poll)
+
+    def poll():
+        """Pick up a finished read, if any. Never blocks the UI thread."""
+        if state["closed"]:
+            return
+        try:
+            snapshot = results.get_nowait()
+        except queue.Empty:
+            state["job"] = root.after(POLL_MS, poll)
+            return
+        render(snapshot)
         state["job"] = root.after(REFRESH_MS, refresh)
 
     root.bind("<Escape>", close)
