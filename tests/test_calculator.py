@@ -1294,10 +1294,10 @@ class TestSystemStats(unittest.TestCase):
         from tokens_counter import system_stats
         self.ss = system_stats
         for name in ("_psutil", "_gpu_percent", "_last_cpu", "_last_disk",
-                     "_FIRST_SAMPLE_SECONDS"):
+                     "_FIRST_SAMPLE_SECONDS", "_MAX_FIRST_WAIT_SECONDS"):
             self.addCleanup(setattr, system_stats, name, getattr(system_stats, name))
         system_stats._last_cpu = system_stats._last_disk = None
-        system_stats._FIRST_SAMPLE_SECONDS = 0
+        system_stats._FIRST_SAMPLE_SECONDS = 0.001
         system_stats._gpu_percent = lambda: None
 
     def _fake_psutil(self, processes=()):
@@ -1350,6 +1350,21 @@ class TestSystemStats(unittest.TestCase):
             t.join()
         for value in readings:
             self.assertAlmostEqual(value, 65.0)
+
+    def test_first_cpu_reading_waits_for_coarse_counters(self):
+        """macOS moves cpu_times() only about once a second; 0.2s showed no change."""
+        from types import SimpleNamespace as NS
+        calls = {"n": 0}
+
+        def coarse_cpu_times():
+            calls["n"] += 1
+            step = calls["n"] // 4          # only moves every 4th call
+            return _Times(4.0 * step, 2.5 * step, 3.5 * step)
+
+        fake = self._fake_psutil()
+        fake.cpu_times = coarse_cpu_times
+        self.ss._psutil = lambda: fake
+        self.assertAlmostEqual(self.ss.get_system_stats()["cpu_percent"], 65.0)
 
     def test_disk_is_activity_not_how_full_it_is(self):
         """A 95%-full but idle disk must not read as 95% - Task Manager shows activity."""

@@ -17,6 +17,7 @@ import time
 _last_cpu = None      # (total_cpu_seconds, idle_cpu_seconds)
 _last_disk = None     # (monotonic_seconds, bytes_read + bytes_written)
 _FIRST_SAMPLE_SECONDS = 0.2
+_MAX_FIRST_WAIT_SECONDS = 1.5
 
 
 def _psutil():
@@ -60,7 +61,15 @@ def _cpu_percent(psutil):
     global _last_cpu
     if _last_cpu is None:
         _last_cpu = _cpu_sample(psutil)
-        time.sleep(_FIRST_SAMPLE_SECONDS)
+        # macOS only advances cpu_times() about once a second (measured on a
+        # CI runner: identical after 0.2s, moved after 1s), so wait for the
+        # counters to actually move rather than a fixed interval.
+        waited = 0.0
+        while True:
+            time.sleep(_FIRST_SAMPLE_SECONDS)
+            waited += _FIRST_SAMPLE_SECONDS
+            if _cpu_sample(psutil)[0] != _last_cpu[0] or waited >= _MAX_FIRST_WAIT_SECONDS:
+                break
     total, idle = _cpu_sample(psutil)
     prev_total, prev_idle = _last_cpu
     _last_cpu = (total, idle)
@@ -105,7 +114,8 @@ def get_system_stats():
     nothing could be read.
 
     CPU and disk are rates since the previous call. The first CPU reading
-    blocks for _FIRST_SAMPLE_SECONDS so it's never a fake 0%; the first disk
+    blocks until the counters move (up to _MAX_FIRST_WAIT_SECONDS) so it's
+    never a fake 0% or missing; the first disk
     reading is None (shown once the next refresh has a second sample).
     Never raises: any field it can't read is None.
     """

@@ -65,6 +65,12 @@ def main():
           "CPU" in parts and "RAM" in parts, json.dumps(parts))
     if "CPU" not in parts:
         _diagnose_cpu()
+    import time
+    time.sleep(1)
+    second = dict((label, text) for label, text, _ in
+                  system_stats.format_stats(system_stats.get_system_stats()))
+    check("system stats: disk activity on the second reading", "Disk" in second,
+          json.dumps(second))
     gpu = gpu_stats.get_gpu_percent()
     # CI machines may have no GPU the OS reports on; the requirement is that
     # reading it never fails and never invents a number.
