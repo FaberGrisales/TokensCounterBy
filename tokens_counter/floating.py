@@ -51,7 +51,18 @@ BAR_BG = "#2a2f3a"
 
 
 # Row tag per source: Claude Code, Claude Desktop's Code tab, OpenCode.
-ORIGIN_TAGS = {"code": "code", "desktop": "desk", "opencode": "open"}
+ORIGIN_TAGS = {"code": "claude", "desktop": "desk", "chat": "chat", "opencode": "opencode"}
+# Anthropic's orange for everything Claude (Code, Desktop's Code tab, Desktop
+# chats), blue for OpenCode, so the two tools read apart at a glance.
+CLAUDE_COLOR = "#d97757"
+OPENCODE_COLOR = "#60a5fa"
+
+
+def _origin_tag(origin):
+    """(label, colour) for a row's source."""
+    origin = origin or "code"
+    return (ORIGIN_TAGS.get(origin, "claude"),
+            OPENCODE_COLOR if origin == "opencode" else CLAUDE_COLOR)
 
 
 def _fmt_tokens(n):
@@ -480,10 +491,11 @@ def run_floating_monitor(config_data, max_rows=5, show_chat_title=False):
                 # Desktop chats: activity only. No tokens, cost or context
                 # exist on disk for them, so none are shown.
                 tk.Label(row, text="●", bg=BG, fg=LIVE, font=("sans", 8)).pack(side="left")
-                tk.Label(row, text="chat", bg=BG, fg=DIM, font=("sans", 7), anchor="w",
-                         width=4).pack(side="left", padx=(4, 0))
-                tk.Label(row, text=item["name"][:16], bg=BG, fg=FG, font=("sans", 8),
-                         anchor="w", width=17).pack(side="left", padx=(4, 0))
+                tag, tag_colour = _origin_tag("chat")
+                tk.Label(row, text=tag, bg=BG, fg=tag_colour, font=("sans", 7), anchor="w",
+                         width=8).pack(side="left", padx=(4, 0))
+                tk.Label(row, text=item["name"][:14], bg=BG, fg=FG, font=("sans", 8),
+                         anchor="w", width=15).pack(side="left", padx=(2, 0))
                 tk.Label(row, text=item["status"], bg=BG, fg=DIM, font=("monospace", 8),
                          anchor="e", width=21).pack(side="left")
                 continue
@@ -495,13 +507,13 @@ def run_floating_monitor(config_data, max_rows=5, show_chat_title=False):
             tk.Label(row, text="●" if s["is_active"] else "○", bg=BG,
                      fg=LIVE if s["is_active"] else DIM,
                      font=("sans", 8)).pack(side="left")
-            # Which app the session was started from: both are real Claude
-            # Code transcripts, so tokens and context mean the same thing.
-            tk.Label(row, text=ORIGIN_TAGS.get(s.get("origin"), "code"),
-                     bg=BG, fg=DIM, font=("sans", 7), anchor="w",
-                     width=4).pack(side="left", padx=(4, 0))
-            tk.Label(row, text=name[:16], bg=BG, fg=FG, font=("sans", 8),
-                     anchor="w", width=17).pack(side="left", padx=(4, 0))
+            # Which tool the session belongs to: Claude Code, Desktop's Code
+            # tab (also Claude Code underneath), or OpenCode.
+            tag, tag_colour = _origin_tag(s.get("origin"))
+            tk.Label(row, text=tag, bg=BG, fg=tag_colour, font=("sans", 7), anchor="w",
+                     width=8).pack(side="left", padx=(4, 0))
+            tk.Label(row, text=name[:14], bg=BG, fg=FG, font=("sans", 8),
+                     anchor="w", width=15).pack(side="left", padx=(2, 0))
             tk.Label(row, text=_fmt_tokens(s["input_tokens"] + s["output_tokens"]),
                      bg=BG, fg=DIM, font=("monospace", 8), anchor="e",
                      width=7).pack(side="left")

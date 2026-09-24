@@ -23,20 +23,23 @@ from tokens_counter import floating
 
 
 _REAL_ENV = {}
+_XDG_VARS = ("XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_CONFIG_HOME")
 
 
 def setUpModule():
     """No test may read the developer's real Claude state."""
     _REAL_ENV["CLAUDE_CONFIG_DIR"] = os.environ.get("CLAUDE_CONFIG_DIR")
-    _REAL_ENV["XDG_DATA_HOME"] = os.environ.get("XDG_DATA_HOME")
+    for var in _XDG_VARS:
+        _REAL_ENV[var] = os.environ.get(var)
     _REAL_ENV["tmp"] = tempfile.mkdtemp()
     os.environ["CLAUDE_CONFIG_DIR"] = _REAL_ENV["tmp"]
-    # OpenCode's database lives under XDG_DATA_HOME (or ~/.local/share).
-    os.environ["XDG_DATA_HOME"] = os.path.join(_REAL_ENV["tmp"], "xdg-data")
+    # OpenCode's database, model catalog and config live under these.
+    for var in _XDG_VARS:
+        os.environ[var] = os.path.join(_REAL_ENV["tmp"], var.lower())
 
 
 def tearDownModule():
-    for var in ("CLAUDE_CONFIG_DIR", "XDG_DATA_HOME"):
+    for var in ("CLAUDE_CONFIG_DIR",) + _XDG_VARS:
         if _REAL_ENV[var] is None:
             os.environ.pop(var, None)
         else:
@@ -1466,6 +1469,13 @@ class TestGpuStats(unittest.TestCase):
             self.gs._linux_percent, self.gs._windows_percent, self.gs._run = real
 
 
+def _restore_env(var, value):
+    if value is None:
+        os.environ.pop(var, None)
+    else:
+        os.environ[var] = value
+
+
 class TestOpenCodeSessions(unittest.TestCase):
     """OpenCode's SQLite database, read-only, in the monitor's session shape."""
 
@@ -1475,7 +1485,8 @@ class TestOpenCodeSessions(unittest.TestCase):
         self.tmp = tempfile.mkdtemp()
         self.db = os.path.join(self.tmp, "opencode.db")
         self.now = time.time()
-        opencode_sessions._cache.update(key=None, sessions=[])
+        opencode_sessions._cache.update(key=None, sessions=[], usage=None)
+        opencode_sessions._windows_cache.update(key=None, windows={})
 
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
@@ -1515,9 +1526,80 @@ class TestOpenCodeSessions(unittest.TestCase):
                          (1500, 350, 300))
         self.assertEqual(s["subagent_count"], 1)
         self.assertEqual(s["models"], ["opencode/big-pickle", "openrouter/qwen/qwen3-4b:free"])
-        self.assertEqual((s["project"], s["origin"], s["context_percent"]), ("api", "opencode", None))
+        self.assertEqual((s["project"], s["origin"]), ("api", "opencode"))
         self.assertTrue(s["is_active"])
         self.assertNotIn("PRIVATE", repr(s))
+
+    def _catalog(self, catalog=None, config=None):
+        """Point OpenCode's cache/config dirs at this test's temp dir."""
+        for var in ("XDG_CACHE_HOME", "XDG_CONFIG_HOME"):
+            self.addCleanup(_restore_env, var, os.environ.get(var))
+            os.environ[var] = os.path.join(self.tmp, var.lower())
+        if catalog is not None:
+            path = self.oc.opencode_catalog_path()
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w") as f:
+                json.dump(catalog, f)
+        if config is not None:
+            path = self.oc.opencode_config_paths()[1]
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w") as f:
+                f.write("// my models\n" + json.dumps(config))
+
+    def test_context_percent_uses_opencodes_own_catalog(self):
+        """Counted like OpenCode's header: input + output + reasoning + cache."""
+        self._catalog({"opencode": {"models": {"big-pickle": {"limit": {"context": 200000}}}}})
+        self._build([("s1", None, "/w", 1)],
+                    [("s1", self._reply("opencode", "big-pickle", 90000, 5000, reasoning=1000,
+                                        cache_read=4000))])
+        [s] = self.oc.get_opencode_sessions(self.db, now=self.now)
+        self.assertEqual((s["context_used_tokens"], s["context_window"]), (100000, 200000))
+        self.assertAlmostEqual(s["context_percent"], 50.0)
+
+    def test_context_uses_the_main_conversation_not_a_subagent(self):
+        self._catalog({"opencode": {"models": {"big-pickle": {"limit": {"context": 100000}}}}})
+        self._build([("s1", None, "/w", 1), ("kid", "s1", "/w", 1)],
+                    [("s1", self._reply("opencode", "big-pickle", 10000, 0, minutes_ago=2)),
+                     ("kid", self._reply("opencode", "big-pickle", 90000, 0, minutes_ago=1))])
+        [s] = self.oc.get_opencode_sessions(self.db, now=self.now)
+        self.assertAlmostEqual(s["context_percent"], 10.0)
+
+    def test_a_failed_last_reply_does_not_read_as_an_empty_context(self):
+        self._catalog({"opencode": {"models": {"big-pickle": {"limit": {"context": 100000}}}}})
+        self._build([("s1", None, "/w", 1)],
+                    [("s1", self._reply("opencode", "big-pickle", 30000, 0, minutes_ago=3)),
+                     ("s1", self._reply("opencode", "big-pickle", 0, 0, minutes_ago=1))])
+        [s] = self.oc.get_opencode_sessions(self.db, now=self.now)
+        self.assertAlmostEqual(s["context_percent"], 30.0)
+
+    def test_routing_suffix_and_user_config_windows(self):
+        """`model:exacto` falls back to `model`; opencode.jsonc declares local models."""
+        self._catalog(
+            {"openrouter": {"models": {"openai/gpt-oss-120b": {"limit": {"context": 131072}}}}},
+            {"provider": {"ollama": {"models": {"qwen3.6:latest": {"limit": {"context": 32768}}}}}})
+        self._build([("a", None, "/w", 2), ("b", None, "/w", 1)],
+                    [("a", self._reply("openrouter", "openai/gpt-oss-120b:exacto", 13107, 0)),
+                     ("b", self._reply("ollama", "qwen3.6:latest", 16384, 0))])
+        by_id = {s["session_id"]: s for s in self.oc.get_opencode_sessions(self.db, now=self.now)}
+        self.assertAlmostEqual(by_id["a"]["context_percent"], 10.0, places=2)
+        self.assertAlmostEqual(by_id["b"]["context_percent"], 50.0)
+
+    def test_unknown_model_has_no_context_percent(self):
+        self._catalog({})
+        self._build([("s1", None, "/w", 1)], [("s1", self._reply("x-ai", "grok-code-fast-1", 10, 5))])
+        [s] = self.oc.get_opencode_sessions(self.db, now=self.now)
+        self.assertIsNone(s["context_percent"])
+
+    def test_usage_by_model_for_the_global_view(self):
+        self._build([("s1", None, "/w", 1), ("s2", None, "/w", 1)],
+                    [("s1", self._reply("opencode", "big-pickle", 100, 10)),
+                     ("s2", self._reply("opencode", "big-pickle", 50, 5)),
+                     ("s2", self._reply("openrouter", "openai/gpt-oss-120b", 10, 1, cost=0.3))])
+        usage = self.oc.get_opencode_usage(self.db)
+        self.assertEqual((usage["session_count"], usage["requests"]), (2, 3))
+        self.assertEqual([m["model"] for m in usage["by_model"]],
+                         ["opencode/big-pickle", "openrouter/openai/gpt-oss-120b"])
+        self.assertAlmostEqual(usage["cost"], 0.3)
 
     def test_paid_models_show_what_opencode_charged(self):
         self._build([("s1", None, "/w", 1)],
@@ -1568,7 +1650,57 @@ class TestOpenCodeSessions(unittest.TestCase):
         finally:
             self.oc.opencode_db_path = real
         self.assertEqual([s["origin"] for s in sessions], ["opencode"])
-        self.assertEqual(floating.ORIGIN_TAGS[sessions[0]["origin"]], "open")
+        self.assertEqual(floating._origin_tag(sessions[0]["origin"]),
+                         ("opencode", floating.OPENCODE_COLOR))
+        self.assertEqual(floating._origin_tag(None), ("claude", floating.CLAUDE_COLOR))
+
+
+class TestToolSeparation(unittest.TestCase):
+    """Claude and OpenCode must read apart in every view that shows both."""
+
+    def _text(self, renderable, width=200):
+        console = Console(width=width, record=True, file=io.StringIO())
+        console.print(renderable)
+        return console.export_text()
+
+    def _session(self, origin=None, **extra):
+        s = {"session_id": "ses_0123456789abcdef", "project": "api", "cwd": "/w/api",
+             "models": ["opencode/big-pickle"], "main_requests": 3, "subagent_count": 0,
+             "input_tokens": 1000, "output_tokens": 100, "cost": 0.0,
+             "last_request": {"input_tokens": 10, "output_tokens": 1},
+             "last_request_cost": 0.0, "context_percent": 42.0, "is_active": True}
+        if origin:
+            s["origin"] = origin
+        s.update(extra)
+        return s
+
+    def test_live_monitor_names_the_tool_for_each_session(self):
+        text = self._text(tui.render_session_monitor_view(
+            [self._session("opencode"), self._session(cost=1.5, models=["claude-opus-5"])]))
+        self.assertIn("OpenCode", text)
+        self.assertIn("Claude Code", text)
+        self.assertIn("42%", text)
+
+    def test_narrow_views_mark_the_tool_with_a_legend(self):
+        real = tui.console
+        try:
+            tui.console = Console(width=60, file=io.StringIO())
+            text = self._text(tui.render_session_monitor_view([self._session("opencode")]), 60)
+        finally:
+            tui.console = real
+        self.assertIn("OC", text)
+        self.assertIn("OpenCode", text)
+
+    def test_global_usage_keeps_opencode_in_its_own_block(self):
+        usage = {"session_count": 2, "requests": 7, "input": 1500, "output": 150, "cost": 0.3,
+                 "by_model": [{"model": f"opencode/m{i}", "requests": 1, "input": 100,
+                               "output": 10, "cost": 0.0} for i in range(7)]}
+        text = self._text(tui.Group(*tui._build_opencode_usage_renderables(usage)))
+        self.assertIn("OpenCode — Usage by Model", text)
+        self.assertIn("+2 more", text)
+        self.assertIn("free", text)
+        self.assertIn("Total", text)
+        self.assertEqual(tui._build_opencode_usage_renderables(None), [])
 
 
 class TestAppSettings(unittest.TestCase):

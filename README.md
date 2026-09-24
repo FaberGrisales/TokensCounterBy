@@ -129,14 +129,14 @@ Al entrar verás una tabla que se refresca sola **cada 2 segundos** con:
 
 Presiona **Ctrl+C** para detener el monitor y volver al menú.
 
-**Sesiones de OpenCode.** Si usas [OpenCode](https://opencode.ai), sus sesiones aparecen en la misma tabla marcadas `OpenCode ·`, con sus modelos (`proveedor/modelo`, p. ej. `opencode/big-pickle`, `openrouter/openai/gpt-oss-120b`, `ollama/qwen3.6`) y sus tokens. Se leen de su base de datos local (`~/.local/share/opencode/opencode.db`, la misma ruta en Windows, macOS y Linux), en modo de solo lectura:
+**Sesiones de OpenCode.** Si usas [OpenCode](https://opencode.ai), sus sesiones aparecen en la misma tabla. La columna **Tool** dice de qué herramienta es cada sesión: Claude Code en naranja u OpenCode en azul (en terminales angostas, `CC` / `OC` con una leyenda). Se muestran con sus modelos (`proveedor/modelo`, p. ej. `opencode/big-pickle`, `openrouter/openai/gpt-oss-120b`, `ollama/qwen3.6`) y sus tokens. Se leen de su base de datos local (`~/.local/share/opencode/opencode.db`, la misma ruta en Windows, macOS y Linux), en modo de solo lectura:
 
 - **Costo**: el que calcula OpenCode mismo. Si usas un modelo de pago a través de OpenCode (Claude, ChatGPT, Gemini…), ves lo que gastaste; con modelos gratuitos o locales dice `free`.
-- **Sin % de contexto** (`N/A`): OpenCode no deja registrado cuánto de la ventana de contexto ocupa cada sesión.
+- **% de contexto**: calculado como lo muestra OpenCode en su propia pantalla (entrada + salida + razonamiento + caché de la última respuesta de la conversación principal), contra el tamaño de contexto del modelo. Ese tamaño sale del catálogo que OpenCode guarda localmente (`~/.cache/opencode/models.json`) o de los límites que definas tú en `~/.config/opencode/opencode.json` (lo típico para modelos de Ollama). Un modelo que no está en ninguno de los dos sale como `N/A` en vez de con un porcentaje inventado.
 - Los subagentes de OpenCode se suman a su sesión principal, igual que en Claude Code.
 - Nunca lee el texto de tus conversaciones ni sus credenciales (`auth.json`).
 
-Las Opciones 2, 4 y 5 siguen siendo solo de Claude Code.
+La Opción 2 muestra OpenCode en una sección aparte (ver abajo). Las Opciones 4 y 5 siguen siendo solo de Claude Code.
 
 **Se adapta al tamaño de tu terminal.** Si la achicas, la vista cambia sola en el siguiente refresco en vez de volverse ilegible:
 
@@ -173,6 +173,7 @@ Contenido:
 - **Total Estimated Cost** y **Total Requests**: sumados sobre todas las sesiones detectadas.
 - **Usage by Model**: la misma idea que la lista de `/usage` (`modelo: input, output, cache read, cache write ($costo)`), pero agregada globalmente. Ordenado por costo, muestra hasta 8 modelos con una fila "+N more" si hay más (para que la vista en vivo no crezca más que una terminal típica).
 - **By Project**: desglose adicional por carpeta de proyecto (esto no existe en `/usage`, pero como esta app ve todas las sesiones a la vez, tiene sentido mostrarlo). También limitado a 8 filas con "+N more" si aplica.
+- **OpenCode — Usage by Model**: si usas OpenCode, una tabla aparte (en azul) con sus modelos: peticiones, tokens de entrada/salida y costo según OpenCode (`free` en modelos gratuitos o locales), hasta 5 modelos más una fila "+N more" y el total. Va separada a propósito: esos modelos no cuentan contra tu plan de Claude, así que no se mezclan con los números de arriba. Las tablas de Claude llevan "Claude Code" en el título para que no haya duda.
 
 **Cómo calculo "Time-in-Window %"**: la primera versión intentaba adivinar "cuándo empezó tu sesión" buscando huecos de inactividad — engañoso, porque cualquier pausa de 5+ horas hacía que pareciera "recién empezada". Una segunda versión anclaba a tu petición **más reciente** y hacía una cuenta regresiva hasta que esa petición saliera de la ventana — matemáticamente correcto, pero como cada mensaje nuevo empuja ese momento hacia adelante, mientras estás trabajando activamente la cuenta regresiva nunca bajaba (parecía congelada). Esta versión ancla a tu petición **más antigua que sigue dentro de la ventana** y mide cuánto tiempo lleva ahí — así el tiempo/porcentaje crece de forma continua con tu uso real, sin reiniciarse en cada mensaje.
 
@@ -262,9 +263,10 @@ Una ventana pequeña (440×232) que se mantiene **siempre encima** del resto de 
 ```
 CPU 51%   RAM 23.0/31.6 GB   GPU 5%   Disk 294 KB/s   Claude 0.6 GB
 ● 2 live   ○ 4 idle           5h 74% · 7d 17% · resets ~3h35m
-●  chat  Resumen reunión…                      active 1m ago
-●  code  TokensCounterBy        1.4M   $224.83    20%
-○  desk  integracion-coti     297.7K     $6.50    76%
+●  chat      Resumen reunión…               active 1m ago
+○  opencode  multi-agents     13.1K     free      -
+○  claude    maersk          986.1K  $219.00     8%
+○  desk      integracion-co  297.7K    $6.50    76%
 ```
 
 **La primera línea** muestra el uso de tu equipo, como el Administrador de tareas: **CPU**, **RAM** usada/total, **GPU** (la del motor más ocupado, igual que el Administrador de tareas), actividad del **disco** (MB/s leídos + escritos, no cuánto espacio ocupa) y cuánta RAM usan los procesos de **Claude** (Desktop y Claude Code). CPU, RAM y GPU se ponen amarillas desde 50% y rojas desde 80%. CPU, RAM y disco necesitan `psutil`; la GPU no necesita nada. En Windows la GPU funciona con cualquier marca; en Linux, con NVIDIA (`nvidia-smi`) y AMD; en macOS, con `ioreg`. Lo que no se pueda leer simplemente no aparece.
@@ -290,9 +292,11 @@ Si la lectura es vieja (más de 5 minutos para Claude Code, más de 20 para Desk
 | Etiqueta | Qué es | Qué muestra |
 |---|---|---|
 | `chat` | Claude Desktop, mientras lo usas (últimos 5 minutos) | **Solo que está activo.** Desktop no guarda tokens, costo ni contexto por conversación en ningún archivo local, así que no hay nada real que mostrar |
-| `code` | Una sesión de Claude Code (terminal o IDE) | Tokens, costo y porcentaje de la ventana de contexto |
-| `desk` | Una sesión de la pestaña **Code** de Claude Desktop | Lo mismo que `code`: por dentro es Claude Code |
-| `open` | Una sesión de **OpenCode** | Tokens y costo (`free` con modelos gratuitos o locales). Sin % de contexto |
+| `claude` | Una sesión de Claude Code (terminal o IDE) | Tokens, costo y porcentaje de la ventana de contexto |
+| `desk` | Una sesión de la pestaña **Code** de Claude Desktop | Lo mismo que `claude`: por dentro es Claude Code |
+| `opencode` | Una sesión de **OpenCode** | Tokens, costo (`free` con modelos gratuitos o locales) y % de contexto cuando se conoce el tamaño del modelo (si no, `-`) |
+
+Las etiquetas de Claude van en **naranja** y las de OpenCode en **azul**, para distinguirlas de un vistazo.
 
 **Título del chat de Desktop (opcional).** La primera vez que abres la Opción 6, la app pregunta si quieres ver el título del chat de Desktop en el que estás. Viene **desactivado** porque los títulos se generan a partir de tus mensajes, y en todo lo demás la app nunca lee contenido de tus conversaciones. Se lee de la caché local de Desktop, sin mandar nada a ningún lado. Tu respuesta queda guardada en `~/.config/tokenscounterby/settings.json` (Windows: `%APPDATA%\TokensCounterBy\settings.json`; macOS: `~/Library/Application Support/TokensCounterBy/settings.json`); bórralo para que vuelva a preguntar.
 

@@ -837,7 +837,9 @@ def watch_global_usage(config_data, refresh_seconds=5):
         # Re-read each tick too: the status line rewrites its cache whenever a
         # Claude Code session renders, and Desktop samples every ~15 minutes.
         plan_limits = get_best_plan_limits()
-        return render_global_usage_live_view(status, rolling_usage, usage_data, plan_limits)
+        from tokens_counter.opencode_sessions import get_opencode_usage
+        return render_global_usage_live_view(status, rolling_usage, usage_data, plan_limits,
+                                             opencode_usage=get_opencode_usage())
 
     with Live(snapshot(), console=console, refresh_per_second=1) as live:
         while True:

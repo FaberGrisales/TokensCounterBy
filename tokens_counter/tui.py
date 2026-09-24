@@ -224,6 +224,21 @@ def _format_local_time(dt):
         return "N/A"
     return dt.astimezone().strftime("%Y-%m-%d %H:%M (local)")
 
+# Same colours as the floating window: orange for Claude, blue for OpenCode.
+CLAUDE_STYLE = "#d97757"
+OPENCODE_STYLE = "#60a5fa"
+
+
+def _tool_label(session, short=False):
+    """Which tool a session belongs to, coloured: 'Claude Code' / 'OpenCode' (or CC / OC)."""
+    if session.get("origin") == "opencode":
+        return f"[{OPENCODE_STYLE}]{'OC' if short else 'OpenCode'}[/]"
+    return f"[{CLAUDE_STYLE}]{'CC' if short else 'Claude Code'}[/]"
+
+
+TOOL_LEGEND = f"[{CLAUDE_STYLE}]CC[/] Claude Code  [{OPENCODE_STYLE}]OC[/] OpenCode"
+
+
 def render_session_monitor_view(sessions):
     """
     Builds (does not print) a Rich renderable summarizing local Claude Code
@@ -273,7 +288,7 @@ def render_session_monitor_view(sessions):
             for s_ in sessions[:15]:
                 project_label = os.path.basename(s_["cwd"]) if s_.get("cwd") else s_["project"]
                 dot = "[bold green]●[/]" if s_["is_active"] else "[dim]○[/]"
-                lines.append(f"{dot} [bold green]{project_label}[/]")
+                lines.append(f"{dot} {_tool_label(s_, short=True)} [bold green]{project_label}[/]")
                 lines.append(
                     f"  {_fmt_tokens(s_['input_tokens'] + s_['output_tokens'])}"
                     f"  [bold yellow]{_fmt_cost(s_['cost'], compact=True)}[/]"
@@ -281,7 +296,7 @@ def render_session_monitor_view(sessions):
                 )
             if not sessions:
                 lines.append("[dim]No sessions[/]")
-            return Group(header, "\n".join(lines), "[dim]Ctrl+C[/]")
+            return Group(header, "\n".join(lines), TOOL_LEGEND, "[dim]Ctrl+C[/]")
 
         # Every column except the project name gets an explicit width, so
         # Rich can only take space from the name. Left flexible, Rich
@@ -290,6 +305,7 @@ def render_session_monitor_view(sessions):
         # into "$9.…" long before it shortens a long project name.
         table = Table(box=box.SIMPLE, border_style="yellow", padding=(0, 1), pad_edge=False)
         table.add_column("S", justify="center", no_wrap=True, width=1)
+        table.add_column("", no_wrap=True, width=2)
         table.add_column("Project", style="bold green", no_wrap=True, overflow="ellipsis")
         table.add_column("Tokens", justify="right", no_wrap=True, width=6)
         table.add_column("Cost", justify="right", style="bold yellow", no_wrap=True, width=9)
@@ -299,6 +315,7 @@ def render_session_monitor_view(sessions):
             project_label = os.path.basename(s_["cwd"]) if s_.get("cwd") else s_["project"]
             table.add_row(
                 "[bold green]●[/]" if s_["is_active"] else "[dim]○[/]",
+                _tool_label(s_, short=True),
                 project_label,
                 _fmt_tokens(s_["input_tokens"] + s_["output_tokens"]),
                 _fmt_cost(s_["cost"], compact=True),
@@ -306,12 +323,13 @@ def render_session_monitor_view(sessions):
             )
 
         if not sessions:
-            table.add_row("-", "No sessions", "-", "-", "-")
+            table.add_row("-", "", "No sessions", "-", "-", "-")
 
-        return Group(header, table, "[dim]Ctrl+C to stop[/]")
+        return Group(header, table, TOOL_LEGEND, "[dim]Ctrl+C to stop[/]")
 
     table = Table(box=box.ROUNDED, border_style="yellow", title="[bold yellow]Sessions (most recently active first)[/]")
     table.add_column("Status", justify="center")
+    table.add_column("Tool", justify="center")
     table.add_column("Project / Session", style="bold green")
     table.add_column("Model(s)", style="cyan")
     table.add_column("Reqs", justify="right")
@@ -326,7 +344,7 @@ def render_session_monitor_view(sessions):
         project_label = os.path.basename(s["cwd"]) if s.get("cwd") else s["project"]
         if s.get("origin") == "opencode":
             # OpenCode ids share a time-ordered "ses_…" prefix; the tail differs.
-            session_label = f"{project_label}\n[dim]OpenCode · …{s['session_id'][-8:]}[/]"
+            session_label = f"{project_label}\n[dim]…{s['session_id'][-8:]}[/]"
         else:
             session_label = f"{project_label}\n[dim]{s['session_id'][:8]}…[/]"
 
@@ -345,6 +363,7 @@ def render_session_monitor_view(sessions):
 
         table.add_row(
             status,
+            _tool_label(s),
             session_label,
             ", ".join(s["models"]) or "-",
             reqs,
@@ -356,7 +375,7 @@ def render_session_monitor_view(sessions):
         )
 
     if not sessions:
-        table.add_row("-", "No local Claude Code or OpenCode sessions found", "-", "-", "-", "-", "-", "-", "-")
+        table.add_row("-", "-", "No local Claude Code or OpenCode sessions found", "-", "-", "-", "-", "-", "-", "-")
 
     footer = "[dim]Refreshing every few seconds · Press Ctrl+C to stop and return to the menu[/]"
 
@@ -641,7 +660,8 @@ def _build_usage_summary_renderables(data):
     # "Usage by model" — mirrors the list format /usage prints for the current session,
     # but aggregated across every local session this app can find.
     model_rows = data["usage_by_model"]
-    model_table = Table(box=box.ROUNDED, border_style="yellow", title="[bold yellow]Usage by Model[/]")
+    model_table = Table(box=box.ROUNDED, border_style="yellow",
+                        title=f"[{CLAUDE_STYLE}]Claude Code[/] [bold yellow]— Usage by Model[/]")
     model_table.add_column("Model", style="bold green")
     model_table.add_column("Input", justify="right")
     model_table.add_column("Output", justify="right")
@@ -668,7 +688,8 @@ def _build_usage_summary_renderables(data):
     # By project — /usage doesn't have this (it's scoped to one session), but
     # this app sees every project's sessions, so it's a natural extension.
     project_rows = data["projects"]
-    project_table = Table(box=box.ROUNDED, border_style="cyan", title="[bold cyan]By Project[/]")
+    project_table = Table(box=box.ROUNDED, border_style="cyan",
+                          title=f"[{CLAUDE_STYLE}]Claude Code[/] [bold cyan]— By Project[/]")
     project_table.add_column("Project", style="bold green")
     project_table.add_column("Requests", justify="right")
     project_table.add_column("Tokens (In / Out)", justify="right")
@@ -688,6 +709,44 @@ def _build_usage_summary_renderables(data):
 
     return renderables
 
+# OpenCode's block in Global Usage is kept shorter than the Claude tables:
+# it's stacked under them in the same Live view, which must stay within one
+# terminal's height (see MAX_TABLE_ROWS).
+OPENCODE_MAX_MODELS = 5
+
+
+def _build_opencode_usage_renderables(usage):
+    """
+    OpenCode's own block for Global Usage: totals plus usage by model, kept
+    apart from the Claude numbers (its models aren't on a Claude plan, and
+    its cost is OpenCode's own figure - "free" for free/local models).
+    Nothing at all when OpenCode isn't installed or has no data.
+    """
+    if not usage:
+        return []
+    table = Table(box=box.ROUNDED, border_style="blue",
+                  title=f"[{OPENCODE_STYLE}]OpenCode — Usage by Model[/]",
+                  caption=(f"[dim]{usage['session_count']} session(s) · "
+                           f"{usage['requests']:,} requests · cost as reported by OpenCode[/]"))
+    table.add_column("Model", style=OPENCODE_STYLE)
+    table.add_column("Reqs", justify="right")
+    table.add_column("Input", justify="right")
+    table.add_column("Output", justify="right")
+    table.add_column("Cost", justify="right", style="bold yellow")
+    models = usage["by_model"]
+    for m in models[:OPENCODE_MAX_MODELS]:
+        table.add_row(m["model"], f"{m['requests']:,}", f"{m['input']:,}", f"{m['output']:,}",
+                      _fmt_cost(m["cost"]))
+    if len(models) > OPENCODE_MAX_MODELS:
+        rest = models[OPENCODE_MAX_MODELS:]
+        table.add_row(f"[dim]+{len(rest)} more[/]", f"{sum(m['requests'] for m in rest):,}",
+                      f"{sum(m['input'] for m in rest):,}", f"{sum(m['output'] for m in rest):,}",
+                      _fmt_cost(sum(m["cost"] for m in rest)))
+    table.add_row("[bold]Total[/]", f"[bold]{usage['requests']:,}[/]", f"[bold]{usage['input']:,}[/]",
+                  f"[bold]{usage['output']:,}[/]", _fmt_cost(usage["cost"]))
+    return [table]
+
+
 def render_usage_summary(data):
     """
     Renders a snapshot modeled on Claude Code's own `/usage` command: total
@@ -699,7 +758,8 @@ def render_usage_summary(data):
         console.print(renderable, justify="center")
         console.print()
 
-def render_global_usage_live_view(status, rolling_usage, data, plan_limits=None):
+def render_global_usage_live_view(status, rolling_usage, data, plan_limits=None,
+                                  opencode_usage=None):
     """
     Builds (does not print) the combined Subscription Status + Global Usage
     renderables as a single Group, for use with rich.live.Live so the whole
@@ -715,6 +775,7 @@ def render_global_usage_live_view(status, rolling_usage, data, plan_limits=None)
     """
     renderables = _build_subscription_status_renderables(status, rolling_usage, plan_limits)
     renderables += _build_usage_summary_renderables(data)
+    renderables += _build_opencode_usage_renderables(opencode_usage)
     renderables.append("[dim]Refreshing every few seconds · Press Ctrl+C to stop and return to the menu[/]")
     return Group(*renderables)
 
