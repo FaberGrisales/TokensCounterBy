@@ -3,7 +3,8 @@ Startup dependency checks, so nothing has to be installed by hand.
 
 Two kinds of dependency, and they are NOT interchangeable:
 
-- pip packages (`rich`) install into whatever interpreter is running, with
+- pip packages (`rich`, and the optional `psutil`) install into whatever
+  interpreter is running, with
   `sys.executable -m pip`. Safe, reversible, no privileges.
 - tkinter is NOT a pip package. It ships with Python on Windows and macOS,
   but on Linux it's a separate OS package (python3-tk), which means a
@@ -115,6 +116,14 @@ def check_dependencies():
             "command": tk_command,
             "manual_hint": tk_hint,
             "why": "Only needed for the floating monitor; the rest of the app works without it.",
+        },
+        {
+            "module": "psutil",
+            "label": "psutil (CPU/RAM/disk line in the floating window)",
+            "required": False,
+            "command": [sys.executable, "-m", "pip", "install", "psutil"],
+            "manual_hint": None,
+            "why": "Only for the system usage line in the floating monitor.",
         },
     ]
     for spec in specs:

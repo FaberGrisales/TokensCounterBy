@@ -12,10 +12,11 @@ Las Opciones 1-4 y 6 son de solo lectura. Hay dos excepciones, y las dos piden c
 
 | | Requisito | Notas |
 |---|---|---|
-| **Sistema operativo** | Linux, macOS o Windows | Probado en Ubuntu con GNOME 46 (Wayland) |
+| **Sistema operativo** | Linux, macOS o Windows | Probado en Windows 11 y en Ubuntu con GNOME 46 (Wayland). WSL no está soportado |
 | **Python** | 3.8 o superior | Se valida al arrancar y aborta con un mensaje claro si es menor |
-| **`rich`** | Requerido | Única dependencia de pip. La app la instala por ti si falta |
+| **`rich`** | Requerido | La única dependencia obligatoria. La app la instala por ti si falta |
 | **`tkinter`** | Opcional | **Solo** para la Opción 6 (ventana flotante). Todo lo demás funciona sin él |
+| **`psutil`** | Opcional | **Solo** para la línea de CPU/RAM/disco de la ventana flotante. Si falta, la Opción 6 te ofrece instalarlo |
 | **Claude Code** | Usado alguna vez en esta máquina | Sin transcripts en `~/.claude/projects` no hay nada que mostrar |
 | **Red / API keys** | **Ninguna** | La app no hace ni una sola llamada de red y no usa ninguna clave |
 
@@ -229,14 +230,17 @@ Cómo funciona:
 
 Funciona tanto si usas **Claude Code** como **Claude Desktop** (o los dos). Si usas Claude Desktop, el porcentaje real de tu plan aparece sin configurar nada; si solo usas Claude Code, activa antes la Opción 7 para verlo.
 
-Una ventana pequeña (400×210) que se mantiene **siempre encima** del resto de ventanas, para dejarla en una esquina y seguir trabajando en el navegador o el editor sin perder de vista tu consumo. Se refresca sola cada 3 segundos.
+Una ventana pequeña (400×232) que se mantiene **siempre encima** del resto de ventanas, para dejarla en una esquina y seguir trabajando en el navegador o el editor sin perder de vista tu consumo. Se refresca sola cada 3 segundos.
 
 ```
+CPU 23%   RAM 19.5/31.6 GB   Disk 95%   Claude 0.6 GB
 ● 2 live   ○ 4 idle           5h 74% · 7d 17% · resets ~3h35m
 ●  chat  Resumen reunión…                      active 1m ago
 ●  code  TokensCounterBy        1.4M   $224.83    20%
 ○  desk  integracion-coti     297.7K     $6.50    76%
 ```
+
+**La primera línea** muestra el uso de tu equipo: **CPU**, **RAM** usada/total, **disco** (de la unidad de tu carpeta de usuario) y cuánta RAM usan los procesos de **Claude** (Desktop y Claude Code). Se pone amarillo desde 50% y rojo desde 80%. Necesita `psutil`; si no lo tienes, la ventana funciona igual sin esta línea.
 
 **El encabezado** muestra, a la derecha, lo mejor que haya disponible:
 

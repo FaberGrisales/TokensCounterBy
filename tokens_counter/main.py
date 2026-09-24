@@ -10,6 +10,7 @@ from tokens_counter import session_monitor
 from tokens_counter import claude_config
 from tokens_counter import dependencies
 from tokens_counter import floating
+from tokens_counter import system_stats
 import tokens_counter.tui as tui
 
 def main():
@@ -43,7 +44,7 @@ def main():
         if optional_missing and not notice_shown:
             for dep in optional_missing:
                 tui.console.print(
-                    f"[dim]Option 6 needs {dep['label']}, which isn't installed. "
+                    f"[dim]Option 6 uses {dep['label']}, which isn't installed. "
                     f"Pick it and the app will offer to install it.[/]"
                 )
             notice_shown = True
@@ -247,6 +248,21 @@ def main():
                 else:
                     input("\nPress Enter to return...")
                     continue
+
+            if not system_stats.is_available():
+                # Optional: without it the window just has no CPU/RAM line.
+                dep = next(d for d in dependencies.check_dependencies()
+                           if d["module"] == "psutil")
+                tui.console.print(
+                    "[dim]The CPU/RAM/disk line needs psutil, which isn't installed "
+                    f"({dependencies.describe(dep)}).[/]"
+                )
+                if Prompt.ask("Install it now?", choices=["y", "n"], default="y") == "y":
+                    ok, message = dependencies.install(dep)
+                    tui.console.print(f"[{'green' if ok else 'red'}]{message}[/]")
+                    optional_missing = [d for d in dependencies.missing() if not d["required"]]
+                else:
+                    tui.console.print("[dim]Opening without the system line.[/]")
 
             settings = load_app_settings()
             if settings["show_desktop_chat_title"] is None:

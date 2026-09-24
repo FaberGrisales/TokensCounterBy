@@ -1,4 +1,7 @@
-# Only dependency: the TUI rendering library. This app makes no external
-# API calls and needs no API keys - it only reads Claude Code's own local
-# files (session transcripts, config), so nothing else is required.
+# Required: the TUI rendering library. This app makes no external API calls
+# and needs no API keys - it only reads Claude Code's and Claude Desktop's
+# own local files (session transcripts, config).
 rich
+# Optional: CPU/RAM/disk line in the floating window (Option 6). The app
+# runs without it and offers to install it when Option 6 is opened.
+psutil

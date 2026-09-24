@@ -262,6 +262,15 @@ def _active_label(activity):
     return f"active {int(age // 60)}m ago"
 
 
+def _system_status():
+    """CPU/RAM/disk stats, or None without psutil or on any failure."""
+    from tokens_counter import system_stats
+    try:
+        return system_stats.get_system_stats()
+    except Exception:
+        return None
+
+
 def _header_counts(sessions, live_sessions, desktop):
     """(live, idle) for the header; an active Desktop counts as one live."""
     return live_sessions + (1 if desktop else 0), len(sessions or []) - live_sessions
@@ -299,7 +308,8 @@ def _collect_snapshot(config_data, show_chat_title=False):
     data and the UI thread does all the drawing.
 
     Returns a dict: `sessions`, `live`, `headline` (text, colour), `desktop`
-    (activity dict while Desktop is in use, else None),
+    (activity dict while Desktop is in use, else None), `system` (CPU/RAM/disk
+    from system_stats, or None without psutil),
     and `error` (a message when the read failed, else None).
     """
     from tokens_counter import session_monitor
@@ -307,7 +317,7 @@ def _collect_snapshot(config_data, show_chat_title=False):
         sessions = session_monitor.get_all_sessions(config_data)
     except Exception as e:
         return {"sessions": None, "live": 0, "headline": None, "desktop": None,
-                "error": str(e)}
+                "system": None, "error": str(e)}
 
     from tokens_counter import claude_config
     try:
@@ -327,6 +337,7 @@ def _collect_snapshot(config_data, show_chat_title=False):
         "live": live,
         "headline": headline,
         "desktop": _desktop_status(show_chat_title),
+        "system": _system_status(),
         "error": None,
     }
 
@@ -368,12 +379,17 @@ def run_floating_monitor(config_data, max_rows=5, show_chat_title=False):
 
     root.title("Tokens")
     root.configure(bg=BG)
-    root.geometry("400x210+80+80")
+    root.geometry("400x232+80+80")
     root.minsize(240, 120)
     root.attributes("-topmost", True)
 
+    # CPU / RAM / disk / Claude memory, above everything else. Empty (and
+    # zero-height) when psutil isn't installed.
+    stats_frame = tk.Frame(root, bg=BG)
+    stats_frame.pack(fill="x", padx=10, pady=(6, 0))
+
     header_frame = tk.Frame(root, bg=BG)
-    header_frame.pack(fill="x", padx=10, pady=(8, 0))
+    header_frame.pack(fill="x", padx=10, pady=(2, 0))
     header = tk.Label(header_frame, bg=BG, fg=ACCENT, font=("sans", 9, "bold"), anchor="w")
     header.pack(side="left")
     # Separate label so the plan percentage can be green/yellow/red on its own
@@ -431,6 +447,16 @@ def run_floating_monitor(config_data, max_rows=5, show_chat_title=False):
         if snapshot["headline"]:
             text, colour = snapshot["headline"]
             plan_label.config(text=text, fg=colour)
+
+        for child in stats_frame.winfo_children():
+            child.destroy()
+        from tokens_counter.system_stats import format_stats
+        for label, text, percent in format_stats(snapshot.get("system")):
+            tk.Label(stats_frame, text=label, bg=BG, fg=DIM,
+                     font=("sans", 7)).pack(side="left")
+            tk.Label(stats_frame, text=text, bg=BG,
+                     fg=FG if percent is None else _context_color(percent),
+                     font=("monospace", 8)).pack(side="left", padx=(2, 10))
 
         for child in rows_frame.winfo_children():
             child.destroy()

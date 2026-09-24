@@ -1275,6 +1275,60 @@ class TestDesktopChatTitle(unittest.TestCase):
             self.assertEqual(floating._rows([], desktop, max_rows=5)[0]["name"], "Claude Desktop")
 
 
+class TestSystemStats(unittest.TestCase):
+    """The floating window's CPU/RAM/disk line; psutil is optional."""
+
+    def setUp(self):
+        from tokens_counter import system_stats
+        self.ss = system_stats
+        self.addCleanup(setattr, system_stats, "_psutil", system_stats._psutil)
+
+    def _fake_psutil(self, processes):
+        from types import SimpleNamespace as NS
+
+        class Error(Exception):
+            pass
+
+        class Proc:
+            def __init__(self, name, rss):
+                self.info = {"name": name, "memory_info": NS(rss=rss)}
+
+        gb = 1024 ** 3
+        return NS(
+            Error=Error,
+            cpu_percent=lambda interval=None: 23.4,
+            virtual_memory=lambda: NS(total=32 * gb, available=20 * gb, percent=37.5),
+            disk_usage=lambda path: NS(percent=61.0),
+            process_iter=lambda attrs: [Proc(n, r) for n, r in processes],
+        )
+
+    def test_without_psutil_there_is_no_line(self):
+        self.ss._psutil = lambda: None
+        self.assertIsNone(self.ss.get_system_stats())
+        self.assertEqual(self.ss.format_stats(None), [])
+
+    def test_reads_cpu_ram_disk_and_claude_memory(self):
+        gb = 1024 ** 3
+        self.ss._psutil = lambda: self._fake_psutil(
+            [("Claude.exe", gb), ("claude", gb // 2), ("chrome.exe", 5 * gb)])
+        stats = self.ss.get_system_stats()
+        self.assertEqual(stats["claude_rss"], gb + gb // 2)
+        self.assertEqual(self.ss.format_stats(stats), [
+            ("CPU", "23%", 23.4), ("RAM", "12.0/32.0 GB", 37.5),
+            ("Disk", "61%", 61.0), ("Claude", "1.5 GB", None)])
+
+    def test_unreadable_fields_are_left_out_not_zeroed(self):
+        parts = self.ss.format_stats({"cpu_percent": 5.0, "ram_used": None, "ram_total": None,
+                                      "ram_percent": None, "disk_percent": None,
+                                      "claude_rss": 0})
+        self.assertEqual([p[0] for p in parts], ["CPU"])
+
+    def test_psutil_is_an_optional_pip_dependency(self):
+        dep = next(d for d in dependencies.check_dependencies() if d["module"] == "psutil")
+        self.assertFalse(dep["required"])
+        self.assertEqual(dep["command"][-3:], ["pip", "install", "psutil"])
+
+
 class TestAppSettings(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
