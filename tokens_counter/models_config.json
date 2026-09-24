@@ -19,6 +19,26 @@
         "supports_caching": true,
         "context_window": 1000000
     },
+    "claude-mythos-5-1": {
+        "name": "Claude Mythos 5.1",
+        "provider": "Anthropic Claude",
+        "input_cost_per_1m": 10.0,
+        "output_cost_per_1m": 50.0,
+        "cache_write_cost_per_1m": 12.5,
+        "cache_read_cost_per_1m": 1.0,
+        "supports_caching": true,
+        "context_window": 1000000
+    },
+    "claude-opus-5-5": {
+        "name": "Claude Opus 5.5",
+        "provider": "Anthropic Claude",
+        "input_cost_per_1m": 4.0,
+        "output_cost_per_1m": 20.0,
+        "cache_write_cost_per_1m": 5.0,
+        "cache_read_cost_per_1m": 0.2,
+        "supports_caching": true,
+        "context_window": 1000000
+    },
     "claude-opus-5": {
         "name": "Claude Opus 5",
         "provider": "Anthropic Claude",

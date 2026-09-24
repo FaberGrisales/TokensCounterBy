@@ -25,7 +25,8 @@ DEFAULT_BUDGET = {
 # windows come from Anthropic's published model table; cache rates follow the
 # documented standard multipliers (cache write = 1.25x input, cache read = 0.1x
 # input) except where Anthropic publishes a specific rate - Claude Fable 5.1
-# reads at a flat $0.25/1M, which is well below the 0.1x rule.
+# reads at a flat $0.25/1M, which is well below the 0.1x rule. Claude Mythos
+# 5.1's cache-read rate was unpublished at launch, so it uses the 0.1x rule.
 #
 # Model IDs are the exact strings that appear as `message.model` in a
 # transcript, complete as-is - never append a date suffix to one. The one
@@ -54,6 +55,26 @@ DEFAULT_CONFIG = {
         "output_cost_per_1m": 50.00,
         "cache_write_cost_per_1m": 12.50,
         "cache_read_cost_per_1m": 1.00,
+        "supports_caching": True,
+        "context_window": 1000000
+    },
+    "claude-mythos-5-1": {
+        "name": "Claude Mythos 5.1",
+        "provider": "Anthropic Claude",
+        "input_cost_per_1m": 10.00,
+        "output_cost_per_1m": 50.00,
+        "cache_write_cost_per_1m": 12.50,
+        "cache_read_cost_per_1m": 1.00,
+        "supports_caching": True,
+        "context_window": 1000000
+    },
+    "claude-opus-5-5": {
+        "name": "Claude Opus 5.5",
+        "provider": "Anthropic Claude",
+        "input_cost_per_1m": 4.00,
+        "output_cost_per_1m": 20.00,
+        "cache_write_cost_per_1m": 5.00,
+        "cache_read_cost_per_1m": 0.20,
         "supports_caching": True,
         "context_window": 1000000
     },
@@ -272,6 +293,53 @@ def save_budget(budget):
     try:
         with open(BUDGET_FILE, 'w', encoding='utf-8') as f:
             json.dump(budget, f, indent=4)
+        return True
+    except Exception:
+        return False
+
+
+# Per-user preferences, deliberately outside the repo: they're personal, and
+# a tracked file would put one user's choice into everyone's checkout.
+# `None` means "never asked" - the app asks before the first use.
+DEFAULT_APP_SETTINGS = {"show_desktop_chat_title": None}
+
+
+def app_settings_path():
+    import sys
+    override = os.environ.get("TOKENS_COUNTER_SETTINGS")
+    if override:
+        return override
+    if sys.platform == "win32":
+        base = os.environ.get("APPDATA") or os.path.expanduser("~\\AppData\\Roaming")
+        return os.path.join(base, "TokensCounterBy", "settings.json")
+    if sys.platform == "darwin":
+        return os.path.expanduser("~/Library/Application Support/TokensCounterBy/settings.json")
+    base = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+    return os.path.join(base, "tokenscounterby", "settings.json")
+
+
+def load_app_settings():
+    """User preferences over the defaults; never raises."""
+    settings = dict(DEFAULT_APP_SETTINGS)
+    try:
+        with open(app_settings_path(), "r", encoding="utf-8") as f:
+            on_disk = json.load(f)
+    except Exception:
+        return settings
+    if isinstance(on_disk, dict):
+        value = on_disk.get("show_desktop_chat_title")
+        if isinstance(value, bool):
+            settings["show_desktop_chat_title"] = value
+    return settings
+
+
+def save_app_settings(settings):
+    """Write the preferences file. Returns True on success."""
+    path = app_settings_path()
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(settings, f, indent=2)
         return True
     except Exception:
         return False

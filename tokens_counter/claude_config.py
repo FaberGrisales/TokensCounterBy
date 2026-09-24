@@ -1,7 +1,7 @@
 import json
 import os
 
-from tokens_counter.session_monitor import get_claude_config_dir
+from tokens_counter.session_monitor import get_claude_config_dir, is_wsl, WSL_WINDOWS_USERS_ROOT
 
 # Read-only, best-effort readers for Claude Code's own local configuration
 # (MCP servers, hooks) — the same data the real `/mcp` and `/hooks` commands
@@ -207,6 +207,7 @@ def get_plan_rate_limits(cache_file=None):
             "resets_at": entry.get("resets_at"),
             "captured_at": own_captured,
             "age_seconds": own_age,
+            "source": "claude_code",
         }
 
     captured_at = None
@@ -444,16 +445,47 @@ def install_statusline(settings_path=None):
 DESKTOP_ACTIVITY_SUBDIRS = ("IndexedDB", "Local Storage", "Session Storage", "WebStorage")
 
 
-def claude_desktop_dir():
-    """Claude Desktop's profile directory for this platform (it may not exist)."""
+def _windows_desktop_dirs(appdata_roaming_dirs, appdata_local_dirs):
+    """
+    Desktop profile candidates on Windows. The Microsoft Store (MSIX) build
+    doesn't use %APPDATA%\\Claude: Windows virtualizes it under
+    %LOCALAPPDATA%\\Packages\\Claude_<publisher-hash>\\LocalCache\\Roaming\\Claude.
+    """
+    import glob
+    candidates = [os.path.join(d, "Claude") for d in appdata_roaming_dirs]
+    for local in appdata_local_dirs:
+        candidates += glob.glob(os.path.join(local, "Packages", "Claude_*",
+                                             "LocalCache", "Roaming", "Claude"))
+    return candidates
+
+
+def claude_desktop_dir(wsl_users_root=None):
+    """
+    Claude Desktop's profile directory for this platform (it may not exist).
+
+    Under WSL, Desktop is the Windows app, so its profile lives on the Windows
+    side (/mnt/c/Users/<user>/...), never in the Linux ~/.config.
+    """
+    import glob
     import sys
-    if sys.platform == "win32":
-        base = os.environ.get("APPDATA") or os.path.expanduser("~\\AppData\\Roaming")
-        return os.path.join(base, "Claude")
     if sys.platform == "darwin":
         return os.path.expanduser("~/Library/Application Support/Claude")
-    base = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
-    return os.path.join(base, "Claude")
+    if sys.platform == "win32":
+        roaming = os.environ.get("APPDATA") or os.path.expanduser("~\\AppData\\Roaming")
+        local = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~\\AppData\\Local")
+        candidates = _windows_desktop_dirs([roaming], [local])
+    else:
+        base = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+        candidates = [os.path.join(base, "Claude")]
+        if wsl_users_root is not None or is_wsl():
+            users = glob.glob(os.path.join(wsl_users_root or WSL_WINDOWS_USERS_ROOT, "*"))
+            candidates += _windows_desktop_dirs(
+                [os.path.join(u, "AppData", "Roaming") for u in users],
+                [os.path.join(u, "AppData", "Local") for u in users])
+    existing = [c for c in candidates if os.path.isdir(c)]
+    # Several Windows accounts can each have Desktop; the most recently
+    # touched profile is the one actually in use.
+    return max(existing, key=os.path.getmtime) if existing else candidates[0]
 
 
 def get_desktop_activity(desktop_dir=None, now=None, active_seconds=None):
@@ -487,7 +519,12 @@ def get_desktop_activity(desktop_dir=None, now=None, active_seconds=None):
         base = os.path.join(root, sub)
         if not os.path.isdir(base):
             continue
-        for dirpath, _dirnames, filenames in os.walk(base):
+        for dirpath, dirnames, filenames in os.walk(base):
+            # *.indexeddb.blob holds attachments in hundreds of near-empty
+            # dirs; every blob write also appends to the sibling leveldb log,
+            # so skipping it loses nothing and cuts a /mnt/c scan from ~4s to
+            # ~0.3s.
+            dirnames[:] = [d for d in dirnames if not d.endswith(".blob")]
             for name in filenames:
                 try:
                     mtime = os.stat(os.path.join(dirpath, name)).st_mtime
@@ -504,4 +541,169 @@ def get_desktop_activity(desktop_dir=None, now=None, active_seconds=None):
         "last_activity_at": datetime.fromtimestamp(newest, timezone.utc),
         "age_seconds": age,
         "is_active": age <= threshold,
+    }
+
+
+# Claude Desktop samples the account's real plan usage into this file while
+# it's open: {"version": 2, "samples": [{"t": <ms>, "org": ..., "u": {"fh": 5h%,
+# "sd": 7d%}}]}, one sample every ~15 minutes, integer percentages, no reset
+# times. It's the same account-wide quota Claude Code's status line reports,
+# so it covers Desktop chats and Code sessions alike.
+DESKTOP_PLAN_HISTORY_FILE = "plan-usage-history.json"
+DESKTOP_SAMPLE_SECONDS = 900
+FIVE_HOUR_SECONDS = 5 * 3600
+
+
+def _desktop_samples(data):
+    """Valid samples of the most recent org, oldest first."""
+    raw = data.get("samples") if isinstance(data, dict) else None
+    if not isinstance(raw, list):
+        return []
+
+    def number(value):
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+    samples = [s for s in raw if isinstance(s, dict) and number(s.get("t"))
+               and isinstance(s.get("u"), dict)
+               and number(s["u"].get("fh")) and number(s["u"].get("sd"))]
+    samples.sort(key=lambda s: s["t"])
+    if not samples:
+        return []
+    org = samples[-1].get("org")
+    return [s for s in samples if s.get("org") == org]
+
+
+def _estimate_five_hour_reset(samples, now):
+    """
+    When the current 5h window resets, from where its usage started rising.
+
+    Desktop records no reset time, but a 5h window starts with the first
+    request after the previous one ended, and usage only climbs within a
+    window. So the window began between the last sample before the climb and
+    the first sample of it. Returns the EARLIEST possible reset (epoch
+    seconds) - never promising more time than you have - or None when the
+    start isn't pinned to within two sample intervals, when there's no active
+    window, or when even the latest possible reset has already passed.
+    """
+    if not samples or samples[-1]["u"]["fh"] <= 0:
+        return None
+    j = len(samples) - 1
+    while j > 0 and 0 < samples[j - 1]["u"]["fh"] <= samples[j]["u"]["fh"]:
+        j -= 1
+    if j == 0:
+        return None
+    before, first = samples[j - 1], samples[j]
+    if (first["t"] - before["t"]) / 1000 > 2 * DESKTOP_SAMPLE_SECONDS:
+        return None
+    earliest = before["t"] / 1000 + FIVE_HOUR_SECONDS
+    latest = first["t"] / 1000 + FIVE_HOUR_SECONDS
+    return earliest if now < latest else None
+
+
+def get_desktop_plan_usage(desktop_dir=None, now=None):
+    """
+    The real 5h/7d plan percentages Claude Desktop last recorded, or None.
+
+    Same shape as get_plan_rate_limits(), with `source: "desktop"` on each
+    window. Reads only the timestamp/org/percentage fields of each sample.
+    The 5h `resets_at` is an estimate (`resets_at_estimated: True`), see
+    _estimate_five_hour_reset(); the 7d one is always None because its resets
+    fall in overnight sampling gaps too wide to pin down.
+    """
+    import time
+    from datetime import datetime, timezone
+
+    root = desktop_dir or claude_desktop_dir()
+    samples = _desktop_samples(_load_json(os.path.join(root, DESKTOP_PLAN_HISTORY_FILE)))
+    if not samples:
+        return None
+
+    now = time.time() if now is None else now
+    latest = samples[-1]
+    captured_at = datetime.fromtimestamp(latest["t"] / 1000, timezone.utc)
+    age = max(0.0, now - latest["t"] / 1000)
+
+    def window(key, resets_at):
+        return {
+            "used_percentage": float(latest["u"][key]),
+            "resets_at": resets_at,
+            "resets_at_estimated": resets_at is not None,
+            "captured_at": captured_at,
+            "age_seconds": age,
+            "source": "desktop",
+        }
+
+    return {
+        "available": True,
+        "captured_at": captured_at,
+        "age_seconds": age,
+        "five_hour": window("fh", _estimate_five_hour_reset(samples, now)),
+        "seven_day": window("sd", None),
+    }
+
+
+def get_desktop_code_session_ids(desktop_dir=None):
+    """
+    Claude Code session ids started from Claude Desktop's Code tab.
+
+    Desktop runs a regular Claude Code under the hood, so those sessions
+    already have normal transcripts (and real tokens/context) under a
+    `.claude/projects` dir; Desktop's own metadata only tells us which ones it
+    launched. Reads just the `cliSessionId` field - never titles or prompts.
+    """
+    import glob
+    root = desktop_dir or claude_desktop_dir()
+    ids = set()
+    for path in glob.glob(os.path.join(root, "claude-code-sessions", "*", "*", "*.json")):
+        data = _load_json(path)
+        session_id = data.get("cliSessionId") if isinstance(data, dict) else None
+        if isinstance(session_id, str) and session_id:
+            ids.add(session_id)
+    return ids
+
+
+def get_best_plan_limits(now=None):
+    """
+    The freshest real plan reading from either source, per window.
+
+    Claude Code's status line (get_plan_rate_limits) and Claude Desktop's own
+    history (get_desktop_plan_usage) report the same account-wide quota, so
+    whichever captured a window more recently wins it. A reset time is only
+    borrowed from the other source when that one is exact (not estimated) and
+    still in the future - a future reset means the window it belongs to is
+    still the current one. Returns None when neither source has anything.
+    """
+    import time
+    now = time.time() if now is None else now
+    code = get_plan_rate_limits()
+    desktop = get_desktop_plan_usage(now=now)
+    if not code or not desktop:
+        return code or desktop
+
+    def reset_epoch(entry):
+        from tokens_counter.statusline import _reset_epoch
+        return _reset_epoch((entry or {}).get("resets_at"))
+
+    merged = {}
+    for key in ("five_hour", "seven_day"):
+        a, b = code.get(key), desktop.get(key)
+        if not a or not b:
+            merged[key] = a or b
+            continue
+        newer, other = (a, b) if (a.get("captured_at") and a["captured_at"] >= b["captured_at"]) else (b, a)
+        chosen = dict(newer)
+        other_reset = reset_epoch(other)
+        if ((chosen.get("resets_at") is None or chosen.get("resets_at_estimated"))
+                and not other.get("resets_at_estimated")
+                and other_reset is not None and other_reset > now):
+            chosen["resets_at"] = other.get("resets_at")
+            chosen["resets_at_estimated"] = False
+        merged[key] = chosen
+
+    ages = [w["age_seconds"] for w in merged.values() if w and w.get("age_seconds") is not None]
+    return {
+        "available": True if any(merged.values()) else code.get("available"),
+        "captured_at": max(d["captured_at"] for d in (code, desktop) if d.get("captured_at")),
+        "age_seconds": min(ages) if ages else None,
+        **merged,
     }

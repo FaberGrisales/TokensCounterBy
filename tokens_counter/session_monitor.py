@@ -3,6 +3,8 @@ import json
 import shutil
 import time
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -29,49 +31,145 @@ def get_claude_config_dir():
     return Path(os.environ.get("CLAUDE_CONFIG_DIR", os.path.expanduser("~/.claude")))
 
 
+WSL_WINDOWS_USERS_ROOT = "/mnt/c/Users"
+
+
+def is_wsl():
+    import platform
+    return "microsoft" in platform.release().lower()
+
+
+def get_session_roots(wsl_users_root=None):
+    """
+    Every Claude config dir whose `projects/` holds this machine's sessions.
+
+    Normally just get_claude_config_dir(). Under WSL, Claude Desktop and any
+    Windows-side Claude Code write to the Windows home's `.claude`
+    (/mnt/c/Users/<user>/.claude), which the Linux ~/.claude never sees, so
+    those are added. An explicit CLAUDE_CONFIG_DIR means "exactly this one"
+    and is honoured as-is - which also keeps the tests hermetic.
+    """
+    roots = [get_claude_config_dir()]
+    if "CLAUDE_CONFIG_DIR" in os.environ:
+        return roots
+    if wsl_users_root is not None or is_wsl():
+        import glob
+        pattern = os.path.join(wsl_users_root or WSL_WINDOWS_USERS_ROOT, "*", ".claude")
+        roots += [Path(p) for p in sorted(glob.glob(pattern))
+                  if os.path.isdir(os.path.join(p, "projects"))]
+    return roots
+
+
 def find_session_groups():
     """
     Find every local Claude Code session, grouping each top-level transcript
     with any subagent/workflow transcripts nested under its own directory.
     Returns a list of {"main": Path, "subagents": [Path, ...]}.
     """
-    projects_dir = get_claude_config_dir() / "projects"
-    if not projects_dir.is_dir():
-        return []
-
-    groups = []
-    try:
-        project_dirs = [p for p in projects_dir.iterdir() if p.is_dir()]
-    except OSError:
-        return []
-
-    for project_dir in project_dirs:
+    project_dirs = []
+    for root in get_session_roots():
+        projects_dir = root / "projects"
+        if not projects_dir.is_dir():
+            continue
         try:
-            entries = list(project_dir.iterdir())
+            project_dirs += [p for p in projects_dir.iterdir() if p.is_dir()]
         except OSError:
             continue
+
+    groups = []
+
+    for project_dir in project_dirs:
+        # scandir, not iterdir + is_file: DirEntry types come from readdir,
+        # while Path.is_file() is one stat per entry - ~12ms each over /mnt/c.
+        try:
+            with os.scandir(project_dir) as it:
+                entries = list(it)
+        except OSError:
+            continue
+        dir_names = {e.name for e in entries if e.is_dir()}
         for entry in entries:
-            if not (entry.is_file() and entry.suffix == ".jsonl"):
+            if not (entry.is_file() and entry.name.endswith(".jsonl")):
                 continue
-            session_dir = project_dir / entry.stem
+            main = project_dir / entry.name
             subagent_files = []
-            if session_dir.is_dir():
+            if main.stem in dir_names:
                 try:
-                    subagent_files = sorted(session_dir.rglob("*.jsonl"))
+                    subagent_files = sorted((project_dir / main.stem).rglob("*.jsonl"))
                 except OSError:
                     subagent_files = []
-            groups.append({"main": entry, "subagents": subagent_files})
+            groups.append({"main": main, "subagents": subagent_files})
 
     return groups
 
 
+# path -> ((st_mtime_ns, st_size), [usage dicts]). Live views re-read every
+# transcript every few seconds; a stat per file is ~100x cheaper than a
+# re-parse (165MB of Windows-side transcripts over WSL's /mnt/c: ~6s to parse,
+# ~0.3s to stat), and only files that actually changed get parsed again.
+# Callers only read the cached dicts - never mutate them.
+_USAGE_CACHE = {}
+
+# While a _scan() is running: path -> os.stat_result, so each file is stat'ed
+# once per scan instead of once per helper that looks at it. None otherwise,
+# so a file changed between two scans is always seen fresh.
+_SCAN_STATS = None
+
+
+def _stat(path):
+    stats = _SCAN_STATS
+    key = str(path)
+    if stats is not None and key in stats:
+        return stats[key]
+    st = os.stat(path)
+    if stats is not None:
+        stats[key] = st
+    return st
+
+
+@contextmanager
+def _scan(groups):
+    """
+    Parse every transcript in `groups` concurrently before a serial pass.
+
+    The work is I/O-bound: over WSL's /mnt/c each stat and read waits on the
+    9P bridge, and 8 threads read the same 93MB in 1.4s instead of 5.9s.
+    The serial code afterwards then only hits _USAGE_CACHE / _SCAN_STATS.
+    """
+    global _SCAN_STATS
+    owner = _SCAN_STATS is None
+    if owner:
+        _SCAN_STATS = {}
+    try:
+        paths = [p for g in groups for p in [g["main"], *g["subagents"]]]
+        if len(paths) > 1:
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                list(pool.map(_iter_usage_lines, paths))
+        yield
+    finally:
+        if owner:
+            _SCAN_STATS = None
+
+
 def _iter_usage_lines(path):
     """
-    Yield token-usage metadata for each assistant message in a transcript
-    file, plus the `name` of any tool it called (`tool_names`, e.g.
+    Token-usage metadata for each assistant message in a transcript file,
+    plus the `name` of any tool it called (`tool_names`, e.g.
     "mcp__filesystem__read_file" or "Bash") - never the tool's arguments or
     result, and never any text/reasoning content.
     """
+    try:
+        st = _stat(path)
+    except OSError:
+        return iter(())
+    key = (st.st_mtime_ns, st.st_size)
+    cached = _USAGE_CACHE.get(str(path))
+    if cached is None or cached[0] != key:
+        cached = (key, list(_parse_usage_lines(path)))
+        _USAGE_CACHE[str(path)] = cached
+    return iter(cached[1])
+
+
+def _parse_usage_lines(path):
     try:
         with open(path, "r", encoding="utf-8") as f:
             for line in f:
@@ -188,7 +286,7 @@ def build_mcp_call_log(group, config_data):
 
 def _safe_mtime(path):
     try:
-        return path.stat().st_mtime
+        return _stat(path).st_mtime
     except OSError:
         return 0.0
 
@@ -421,10 +519,12 @@ def get_all_sessions(config_data, now=None):
     """Return a summary per local Claude Code session, most recently active first."""
     now = time.time() if now is None else now
     summaries = []
-    for group in find_session_groups():
-        summary = build_session_summary(group, config_data, now=now)
-        if summary:
-            summaries.append(summary)
+    groups = find_session_groups()
+    with _scan(groups):
+        for group in groups:
+            summary = build_session_summary(group, config_data, now=now)
+            if summary:
+                summaries.append(summary)
     summaries.sort(key=lambda s: s["mtime"], reverse=True)
     return summaries
 
@@ -441,8 +541,10 @@ def get_cleanup_candidates(config_data, now=None, threshold_seconds=CLEANUP_INAC
     """
     now = time.time() if now is None else now
     candidates = []
-    for group in find_session_groups():
-        summary = build_session_summary(group, config_data, now=now)
+    groups = find_session_groups()
+    with _scan(groups):
+        summaries = [(group, build_session_summary(group, config_data, now=now)) for group in groups]
+    for group, summary in summaries:
         if summary is None:
             continue
         age_seconds = now - summary["mtime"]
@@ -601,34 +703,36 @@ def get_rolling_window_usage(config_data, now=None):
     for w in windows.values():
         w.update({"input": 0, "output": 0, "cache_read": 0, "cache_write": 0, "requests": 0, "cost": 0.0, "any_priced": False, "window_start_at": None})
 
-    for group in find_session_groups():
-        for _, path in [(False, group["main"])] + [(True, p) for p in group["subagents"]]:
-            for usage_line in _iter_usage_lines(path):
-                ts = _parse_timestamp(usage_line["timestamp"])
-                if ts is None:
-                    continue
+    groups = find_session_groups()
+    with _scan(groups):
+        lines = [line for group in groups for path in [group["main"], *group["subagents"]]
+                 for line in _iter_usage_lines(path)]
+    for usage_line in lines:
+        ts = _parse_timestamp(usage_line["timestamp"])
+        if ts is None:
+            continue
 
-                model = usage_line["model"]
-                cost = None
-                if model in config_data:
-                    cost = calculate_call_cost(
-                        model, usage_line["input_tokens"], usage_line["output_tokens"],
-                        cached_read_tokens=usage_line["cache_read_tokens"], cached_write_tokens=usage_line["cache_write_tokens"]
-                    )
+        model = usage_line["model"]
+        cost = None
+        if model in config_data:
+            cost = calculate_call_cost(
+                model, usage_line["input_tokens"], usage_line["output_tokens"],
+                cached_read_tokens=usage_line["cache_read_tokens"], cached_write_tokens=usage_line["cache_write_tokens"]
+            )
 
-                for w in windows.values():
-                    if ts < w["cutoff"] or ts > now:
-                        continue
-                    w["input"] += usage_line["input_tokens"]
-                    w["output"] += usage_line["output_tokens"]
-                    w["cache_read"] += usage_line["cache_read_tokens"]
-                    w["cache_write"] += usage_line["cache_write_tokens"]
-                    w["requests"] += 1
-                    if cost is not None:
-                        w["cost"] += cost
-                        w["any_priced"] = True
-                    if w["window_start_at"] is None or ts < w["window_start_at"]:
-                        w["window_start_at"] = ts
+        for w in windows.values():
+            if ts < w["cutoff"] or ts > now:
+                continue
+            w["input"] += usage_line["input_tokens"]
+            w["output"] += usage_line["output_tokens"]
+            w["cache_read"] += usage_line["cache_read_tokens"]
+            w["cache_write"] += usage_line["cache_write_tokens"]
+            w["requests"] += 1
+            if cost is not None:
+                w["cost"] += cost
+                w["any_priced"] = True
+            if w["window_start_at"] is None or ts < w["window_start_at"]:
+                w["window_start_at"] = ts
 
     result = {}
     for key, w in windows.items():
@@ -737,7 +841,7 @@ def watch_global_usage(config_data, refresh_seconds=5):
     from rich.live import Live
     # Imported lazily (not at module load) to avoid a circular import, since
     # claude_config.py itself imports get_claude_config_dir from this module.
-    from tokens_counter.claude_config import get_subscription_status, get_plan_rate_limits
+    from tokens_counter.claude_config import get_subscription_status, get_best_plan_limits
     from tokens_counter.tui import console, render_global_usage_live_view
 
     def snapshot():
@@ -747,9 +851,9 @@ def watch_global_usage(config_data, refresh_seconds=5):
         # the app restarted.
         rolling_usage = apply_budgets(get_rolling_window_usage(config_data), load_budget())
         usage_data = get_global_usage_summary(config_data)
-        # Re-read each tick too: the status line rewrites this cache whenever a
-        # Claude Code session renders, so the real plan % updates live.
-        plan_limits = get_plan_rate_limits()
+        # Re-read each tick too: the status line rewrites its cache whenever a
+        # Claude Code session renders, and Desktop samples every ~15 minutes.
+        plan_limits = get_best_plan_limits()
         return render_global_usage_live_view(status, rolling_usage, usage_data, plan_limits)
 
     with Live(snapshot(), console=console, refresh_per_second=1) as live:

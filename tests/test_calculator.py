@@ -22,6 +22,29 @@ from tokens_counter import dependencies
 from tokens_counter import floating
 
 
+_REAL_ENV = {}
+
+
+def setUpModule():
+    """
+    No test may read the developer's real Claude state. An explicit, empty
+    CLAUDE_CONFIG_DIR also turns off the WSL lookup of the Windows home's
+    .claude (see session_monitor.get_session_roots), which otherwise pulled
+    real transcripts over /mnt/c into tests that don't set one themselves.
+    """
+    _REAL_ENV["CLAUDE_CONFIG_DIR"] = os.environ.get("CLAUDE_CONFIG_DIR")
+    _REAL_ENV["tmp"] = tempfile.mkdtemp()
+    os.environ["CLAUDE_CONFIG_DIR"] = _REAL_ENV["tmp"]
+
+
+def tearDownModule():
+    if _REAL_ENV["CLAUDE_CONFIG_DIR"] is None:
+        os.environ.pop("CLAUDE_CONFIG_DIR", None)
+    else:
+        os.environ["CLAUDE_CONFIG_DIR"] = _REAL_ENV["CLAUDE_CONFIG_DIR"]
+    shutil.rmtree(_REAL_ENV["tmp"], ignore_errors=True)
+
+
 class TestTokensCalculator(unittest.TestCase):
 
     def test_cost_calculation_claude_no_cache(self):
@@ -1057,6 +1080,7 @@ class TestPlanRateLimits(unittest.TestCase):
         result = subprocess.run(
             command, shell=True, input='{"rate_limits_available":false,"rate_limits":null}',
             capture_output=True, text=True, timeout=30,
+            env={**os.environ, "TOKENS_COUNTER_CACHE": os.path.join(self.tmp, "cache.json")},
         )
         self.assertEqual(result.returncode, 0, f"shell run failed: {result.stderr}")
 
@@ -1093,12 +1117,22 @@ class TestPlanRateLimits(unittest.TestCase):
 class TestStatuslineScript(unittest.TestCase):
     """The capture script runs inside the user's Claude Code on every render."""
 
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.cache = os.path.join(self.tmp, "rate_limits_cache.json")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
     def _run(self, stdin_text):
         import subprocess
         script = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                               "tokens_counter", "statusline.py")
+        # Without the override the script writes the fake percentages below into
+        # the real user cache, where the app would show them as Claude's own.
         return subprocess.run([sys.executable, script], input=stdin_text,
-                              capture_output=True, text=True, timeout=30)
+                              capture_output=True, text=True, timeout=30,
+                              env={**os.environ, "TOKENS_COUNTER_CACHE": self.cache})
 
     def test_never_fails_on_bad_input(self):
         """
@@ -1118,6 +1152,290 @@ class TestStatuslineScript(unittest.TestCase):
         self.assertIn("7d 12%", result.stdout)
 
 
+def _hide_real_desktop(testcase):
+    """Point Desktop lookups at a missing dir so a real install can't leak in."""
+    real = claude_config.claude_desktop_dir
+    missing = os.path.join(tempfile.gettempdir(), "tokenscounter-no-desktop-profile")
+    claude_config.claude_desktop_dir = lambda *a, **k: missing
+    testcase.addCleanup(setattr, claude_config, "claude_desktop_dir", real)
+
+
+def _v8_str(text):
+    """A V8-serialized string: one-byte when Latin-1 fits, else two-byte."""
+    try:
+        raw = text.encode("latin-1")
+        return b'"' + bytes([len(raw)]) + raw
+    except UnicodeEncodeError:
+        raw = text.encode("utf-16-le")
+        return b"c" + bytes([len(raw)]) + raw
+
+
+def _v8_key(key):
+    return b'"' + bytes([len(key)]) + key.encode()
+
+
+def _chat_record(uuid, title, updated_ms, model="claude-opus-5", messages="secret body text"):
+    import struct
+    return (b"\x00" * 12 + _v8_key("product") + _v8_str("chat")
+            + _v8_key("conversationUpdatedAt") + b"N" + struct.pack("<d", updated_ms)
+            + _v8_key("messageCount") + b"I" + bytes([4 << 1])
+            + _v8_key("tree") + b"o"
+            + _v8_key("uuid") + _v8_str(uuid)
+            + _v8_key("name") + _v8_str(title)
+            + _v8_key("summary") + _v8_str("")
+            + _v8_key("model") + _v8_str(model)
+            + _v8_key("chat_messages") + _v8_key("text") + _v8_str(messages)
+            + _v8_key("name") + _v8_str("a tool name inside a message"))
+
+
+def _leveldb_log(records, split_first=False):
+    """Encode records as a leveldb log (checksums unchecked by the reader)."""
+    import struct
+    out = b""
+    for rec in records:
+        if split_first:
+            # Force a FIRST/LAST split across the 32KB block boundary.
+            # A filler record, then FIRST (header + 10 bytes) ends the block exactly.
+            pad = 32768 - len(out) - 7 - 7 - 10
+            out += struct.pack("<IHB", 0, pad, 1) + b"\x00" * pad
+            head, tail = rec[:10], rec[10:]
+            out += struct.pack("<IHB", 0, len(head), 2) + head
+            out += struct.pack("<IHB", 0, len(tail), 4) + tail
+            split_first = False
+        else:
+            out += struct.pack("<IHB", 0, len(rec), 1) + rec
+    return out
+
+
+class TestDesktopChatTitle(unittest.TestCase):
+    """The opt-in title of the active Claude Desktop chat, from its local cache."""
+
+    def setUp(self):
+        from tokens_counter import desktop_chats
+        self.dc = desktop_chats
+        self.tmp = tempfile.mkdtemp()
+        self.idb = os.path.join(self.tmp, desktop_chats.IDB_DIR)
+        os.makedirs(self.idb)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _write(self, records, **kw):
+        with open(os.path.join(self.idb, "000103.log"), "wb") as f:
+            f.write(_leveldb_log(records, **kw))
+
+    def test_most_recently_updated_chat_is_active(self):
+        self._write([_chat_record("a" * 36, "Old chat", 1000.0),
+                     _chat_record("b" * 36, "Current chat", 5000.0)])
+        chat = self.dc.get_active_chat(self.tmp)
+        self.assertEqual((chat["title"], chat["model"], chat["message_count"]),
+                         ("Current chat", "claude-opus-5", 4))
+
+    def test_a_newer_version_of_the_same_chat_wins(self):
+        self._write([_chat_record("a" * 36, "First name", 1000.0),
+                     _chat_record("a" * 36, "Renamed", 2000.0)])
+        self.assertEqual(self.dc.get_active_chat(self.tmp)["title"], "Renamed")
+
+    def test_non_latin_titles_decode(self):
+        self._write([_chat_record("a" * 36, "Cotización ☕ día", 1000.0)])
+        self.assertEqual(self.dc.get_active_chat(self.tmp)["title"], "Cotización ☕ día")
+
+    def test_a_record_split_across_blocks_is_reassembled(self):
+        self._write([_chat_record("a" * 36, "Split chat", 1000.0)], split_first=True)
+        self.assertEqual(self.dc.get_active_chat(self.tmp)["title"], "Split chat")
+
+    def test_message_content_is_never_returned(self):
+        self._write([_chat_record("a" * 36, "Title", 1000.0, messages="PRIVATE")])
+        chat = self.dc.get_active_chat(self.tmp)
+        self.assertEqual(set(chat), {"uuid", "title", "model", "message_count", "updated_at"})
+        self.assertNotIn("PRIVATE", repr(chat))
+
+    def test_missing_or_corrupt_cache_gives_none(self):
+        self.assertIsNone(self.dc.get_active_chat(self.tmp))
+        with open(os.path.join(self.idb, "000103.log"), "wb") as f:
+            f.write(b"\xff" * 5000)
+        self.assertIsNone(self.dc.get_active_chat(self.tmp))
+
+    def test_row_shows_the_title_and_still_no_usage(self):
+        desktop = {"age_seconds": 30, "chat": {"title": "Current chat"}}
+        row = floating._rows([], desktop, max_rows=5)[0]
+        self.assertEqual((row["name"], row["status"]), ("Current chat", "active now"))
+
+    def test_row_falls_back_without_a_title(self):
+        for desktop in ({"age_seconds": 30}, {"age_seconds": 30, "chat": None},
+                        {"age_seconds": 30, "chat": {"title": ""}}):
+            self.assertEqual(floating._rows([], desktop, max_rows=5)[0]["name"], "Claude Desktop")
+
+
+class TestAppSettings(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        previous = os.environ.get("TOKENS_COUNTER_SETTINGS")
+        os.environ["TOKENS_COUNTER_SETTINGS"] = os.path.join(self.tmp, "sub", "settings.json")
+        self.addCleanup(lambda: os.environ.pop("TOKENS_COUNTER_SETTINGS", None)
+                        if previous is None else os.environ.__setitem__("TOKENS_COUNTER_SETTINGS", previous))
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_chat_title_is_unset_until_asked(self):
+        from tokens_counter.config import load_app_settings
+        self.assertIsNone(load_app_settings()["show_desktop_chat_title"])
+
+    def test_choice_round_trips(self):
+        from tokens_counter.config import load_app_settings, save_app_settings
+        self.assertTrue(save_app_settings({"show_desktop_chat_title": True}))
+        self.assertTrue(load_app_settings()["show_desktop_chat_title"])
+
+    def test_a_non_boolean_value_counts_as_unset(self):
+        from tokens_counter.config import load_app_settings, app_settings_path
+        os.makedirs(os.path.dirname(app_settings_path()))
+        with open(app_settings_path(), "w") as f:
+            json.dump({"show_desktop_chat_title": "yes"}, f)
+        self.assertIsNone(load_app_settings()["show_desktop_chat_title"])
+
+
+class TestSessionSources(unittest.TestCase):
+    """Sessions from every app on the machine, read cheaply enough to refresh."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _without_config_dir(self):
+        previous = os.environ.pop("CLAUDE_CONFIG_DIR", None)
+        self.addCleanup(os.environ.__setitem__, "CLAUDE_CONFIG_DIR", previous or "")
+
+    def test_wsl_adds_the_windows_home_sessions(self):
+        """Desktop and Windows-side Claude Code write there, not to the Linux ~/.claude."""
+        self._without_config_dir()
+        windows = os.path.join(self.tmp, "Users", "me", ".claude")
+        os.makedirs(os.path.join(windows, "projects"))
+        os.makedirs(os.path.join(self.tmp, "Users", "Public"))
+        roots = session_monitor.get_session_roots(wsl_users_root=os.path.join(self.tmp, "Users"))
+        self.assertEqual(roots[1:], [session_monitor.Path(windows)])
+
+    def test_an_explicit_config_dir_is_the_only_root(self):
+        os.makedirs(os.path.join(self.tmp, "Users", "me", ".claude", "projects"))
+        roots = session_monitor.get_session_roots(wsl_users_root=os.path.join(self.tmp, "Users"))
+        self.assertEqual(len(roots), 1)
+
+    def test_a_changed_transcript_is_parsed_again(self):
+        path = os.path.join(self.tmp, "s.jsonl")
+        line = {"timestamp": "2026-01-01T00:00:00Z", "message": {
+            "model": "claude-opus-5-5", "usage": {"input_tokens": 10, "output_tokens": 1}}}
+        with open(path, "w") as f:
+            f.write(json.dumps(line) + "\n")
+        self.assertEqual(len(list(session_monitor._iter_usage_lines(path))), 1)
+        with open(path, "a") as f:
+            f.write(json.dumps(line) + "\n")
+        self.assertEqual(len(list(session_monitor._iter_usage_lines(path))), 2)
+
+    def test_desktop_code_sessions_are_identified_by_id_only(self):
+        meta = os.path.join(self.tmp, "claude-code-sessions", "a", "org", "local_1.json")
+        os.makedirs(os.path.dirname(meta))
+        with open(meta, "w") as f:
+            json.dump({"cliSessionId": "abc-123", "title": "private chat title"}, f)
+        self.assertEqual(claude_config.get_desktop_code_session_ids(self.tmp), {"abc-123"})
+
+
+class TestDesktopPlanUsage(unittest.TestCase):
+    """
+    Claude Desktop records the real account-wide plan percentages itself, so
+    they're available whether or not Claude Code's status line is installed.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.now = time.time()
+        _hide_real_desktop(self)
+        from tokens_counter import statusline
+        real_cache = statusline.CACHE_FILE
+        statusline.CACHE_FILE = os.path.join(self.tmp, "cache.json")
+        self.addCleanup(setattr, statusline, "CACHE_FILE", real_cache)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _write(self, samples, org="org-1"):
+        """samples: (minutes_ago, five_hour_pct, seven_day_pct)."""
+        with open(os.path.join(self.tmp, "plan-usage-history.json"), "w") as f:
+            json.dump({"version": 2, "samples": [
+                {"t": int((self.now - m * 60) * 1000), "org": org, "u": {"fh": fh, "sd": sd}}
+                for m, fh, sd in samples]}, f)
+
+    def test_missing_history_returns_none(self):
+        self.assertIsNone(claude_config.get_desktop_plan_usage(self.tmp, now=self.now))
+
+    def test_reports_the_latest_sample(self):
+        self._write([(40, 10, 5), (25, 20, 6), (10, 35, 7)])
+        usage = claude_config.get_desktop_plan_usage(self.tmp, now=self.now)
+        self.assertEqual(usage["five_hour"]["used_percentage"], 35)
+        self.assertEqual(usage["seven_day"]["used_percentage"], 7)
+        self.assertAlmostEqual(usage["age_seconds"], 600, delta=2)
+        self.assertEqual(usage["five_hour"]["source"], "desktop")
+
+    def test_estimates_the_reset_from_where_usage_started_rising(self):
+        """The window began between the last 0% sample and the first rise."""
+        self._write([(75, 0, 5), (60, 13, 6), (45, 30, 7)])
+        reset = claude_config.get_desktop_plan_usage(self.tmp, now=self.now)["five_hour"]
+        self.assertTrue(reset["resets_at_estimated"])
+        # Earliest bound: the 0% sample + 5h, never promising extra time.
+        self.assertAlmostEqual(reset["resets_at"], self.now - 75 * 60 + 5 * 3600, delta=2)
+
+    def test_no_reset_estimate_when_the_start_fell_in_a_long_gap(self):
+        self._write([(600, 0, 5), (60, 13, 6)])
+        self.assertIsNone(
+            claude_config.get_desktop_plan_usage(self.tmp, now=self.now)["five_hour"]["resets_at"])
+
+    def test_no_seven_day_reset_is_invented(self):
+        self._write([(75, 0, 0), (60, 13, 6)])
+        self.assertIsNone(
+            claude_config.get_desktop_plan_usage(self.tmp, now=self.now)["seven_day"]["resets_at"])
+
+    def test_only_the_current_org_counts(self):
+        self._write([(10, 90, 50)], org="old-org")
+        with open(os.path.join(self.tmp, "plan-usage-history.json")) as f:
+            data = json.load(f)
+        data["samples"].append({"t": int(self.now * 1000), "org": "new-org", "u": {"fh": 5, "sd": 1}})
+        with open(os.path.join(self.tmp, "plan-usage-history.json"), "w") as f:
+            json.dump(data, f)
+        usage = claude_config.get_desktop_plan_usage(self.tmp, now=self.now)
+        self.assertEqual(usage["five_hour"]["used_percentage"], 5)
+
+    def test_corrupt_history_returns_none(self):
+        with open(os.path.join(self.tmp, "plan-usage-history.json"), "w") as f:
+            f.write("{ not json")
+        self.assertIsNone(claude_config.get_desktop_plan_usage(self.tmp, now=self.now))
+
+    def test_desktop_alone_feeds_the_widget_headline(self):
+        """No status line installed: the widget still shows the real %."""
+        self._write([(75, 0, 5), (60, 13, 6), (5, 48, 14)])
+        claude_config.claude_desktop_dir = lambda *a, **k: self.tmp
+        text, _ = floating._plan_headline(load_config())
+        self.assertTrue(text.startswith("5h 48% · 7d 14% · resets ~"), text)
+
+    def test_the_fresher_source_wins_and_borrows_an_exact_reset(self):
+        from tokens_counter import statusline
+        self._write([(20, 40, 10)])
+        claude_config.claude_desktop_dir = lambda *a, **k: self.tmp
+        resets = int(self.now + 3600)
+        with open(statusline.CACHE_FILE, "w") as f:
+            json.dump({"source": statusline.CACHE_SOURCE,
+                       "captured_at": datetime.now(timezone.utc).isoformat(),
+                       "rate_limits_available": True,
+                       "rate_limits": {"five_hour": {
+                           "used_percentage": 30.0, "resets_at": resets,
+                           "captured_at": (datetime.now(timezone.utc)
+                                           - timedelta(hours=1)).isoformat()}}}, f)
+        best = claude_config.get_best_plan_limits(now=self.now)
+        self.assertEqual(best["five_hour"]["used_percentage"], 40)
+        self.assertEqual(best["five_hour"]["resets_at"], resets)
+        self.assertFalse(best["five_hour"]["resets_at_estimated"])
+
+
 class TestFloatingPlanHeadline(unittest.TestCase):
     """
     The floating window's headline. It replaced the total-spend figure with
@@ -1133,6 +1451,7 @@ class TestFloatingPlanHeadline(unittest.TestCase):
         self.tmp = tempfile.mkdtemp()
         statusline.CACHE_FILE = os.path.join(self.tmp, "rate_limits_cache.json")
         self.config_data = load_config()
+        _hide_real_desktop(self)
 
     def tearDown(self):
         self.statusline.CACHE_FILE = self.real_cache
@@ -1412,7 +1731,8 @@ class TestStatuslineDiagnostics(unittest.TestCase):
 
     def test_detects_an_unquoted_path_with_spaces(self):
         """The bug that shipped: a space in the path splits the command."""
-        self._set(f"/usr/bin/python3 {self.here}/statusline.py")
+        # A fixed spaced path: the checkout's own path may not contain a space.
+        self._set("/usr/bin/python3 /home/me/Personal Projects/tokens_counter/statusline.py")
         problems = claude_config.statusline_status_report()["problems"]
         self.assertTrue(any("shell arguments" in p for p in problems), problems)
 
@@ -1561,6 +1881,7 @@ class TestNewSessionDoesNotWipeTheReading(unittest.TestCase):
         with open(self.cache, "w") as f:
             json.dump(data, f)
 
+        _hide_real_desktop(self)
         real = statusline.CACHE_FILE
         try:
             statusline.CACHE_FILE = self.cache
@@ -1616,31 +1937,77 @@ class TestDesktopFallback(unittest.TestCase):
         self._touch("IndexedDB/https_claude.ai_0.indexeddb.leveldb/000003.log", 7200)
         self.assertFalse(claude_config.get_desktop_activity(self.tmp, now=self.now)["is_active"])
 
-    def test_live_claude_code_sessions_always_win(self):
-        """Code carries real per-session numbers; Desktop never displaces it."""
+    def test_blob_attachment_dirs_are_skipped(self):
+        """Hundreds of near-empty blob dirs made a /mnt/c scan take ~4s."""
+        self._touch("IndexedDB/https_claude.ai_0.indexeddb.blob/1/dc/dc95", 5)
+        self._touch("IndexedDB/https_claude.ai_0.indexeddb.leveldb/000003.log", 7200)
+        self.assertFalse(claude_config.get_desktop_activity(self.tmp, now=self.now)["is_active"])
+
+    def _wsl_desktop_dir(self):
+        if sys.platform in ("win32", "darwin"):
+            self.skipTest("the WSL lookup is Linux-only")
+        previous = os.environ.get("XDG_CONFIG_HOME")
+        os.environ["XDG_CONFIG_HOME"] = os.path.join(self.tmp, "linux-config")
+        try:
+            return claude_config.claude_desktop_dir(
+                wsl_users_root=os.path.join(self.tmp, "Users"))
+        finally:
+            if previous is None:
+                os.environ.pop("XDG_CONFIG_HOME", None)
+            else:
+                os.environ["XDG_CONFIG_HOME"] = previous
+
+    def test_wsl_finds_the_microsoft_store_profile(self):
+        """Under WSL, Desktop is the Windows app; the MSIX build is virtualized."""
+        msix = os.path.join(self.tmp, "Users", "me", "AppData", "Local", "Packages",
+                            "Claude_pzs8sxrjxfjjc", "LocalCache", "Roaming", "Claude")
+        os.makedirs(msix)
+        self.assertEqual(self._wsl_desktop_dir(), msix)
+
+    def test_wsl_finds_the_classic_installer_profile(self):
+        roaming = os.path.join(self.tmp, "Users", "me", "AppData", "Roaming", "Claude")
+        os.makedirs(roaming)
+        self.assertEqual(self._wsl_desktop_dir(), roaming)
+
+    def _desktop_here(self):
+        real = claude_config.claude_desktop_dir
+        claude_config.claude_desktop_dir = lambda *a, **k: self.tmp
+        self.addCleanup(setattr, claude_config, "claude_desktop_dir", real)
+
+    def test_active_desktop_is_reported(self):
         self._touch("IndexedDB/x.log", 1)
-        real = claude_config.claude_desktop_dir
-        try:
-            claude_config.claude_desktop_dir = lambda: self.tmp
-            self.assertFalse(floating._desktop_takes_over(2))
-            self.assertTrue(floating._desktop_takes_over(0))
-        finally:
-            claude_config.claude_desktop_dir = real
+        self._desktop_here()
+        self.assertIsNotNone(floating._desktop_status())
 
-    def test_idle_desktop_does_not_take_over(self):
+    def test_idle_desktop_is_not_reported(self):
         self._touch("IndexedDB/x.log", 7200)
-        real = claude_config.claude_desktop_dir
-        try:
-            claude_config.claude_desktop_dir = lambda: self.tmp
-            self.assertFalse(floating._desktop_takes_over(0))
-        finally:
-            claude_config.claude_desktop_dir = real
+        self._desktop_here()
+        self.assertIsNone(floating._desktop_status())
 
-    def test_desktop_line_reports_activity_not_usage(self):
-        line = floating._desktop_line({"age_seconds": 150})
-        self.assertEqual(line, "Claude Desktop · active 2m ago")
+    def _session(self, sid, origin="code"):
+        return {"session_id": sid, "origin": origin, "is_active": True}
+
+    def test_desktop_chat_row_sits_alongside_code_sessions(self):
+        """Desktop in use never hides the Code sessions, and vice versa."""
+        rows = floating._rows([self._session("a"), self._session("b", "desktop")],
+                              {"age_seconds": 150}, max_rows=5)
+        self.assertEqual([r["kind"] for r in rows], ["chat", "session", "session"])
+        self.assertEqual(rows[0]["status"], "active 2m ago")
+
+    def test_chat_row_carries_no_usage_numbers(self):
+        """Desktop chats keep no per-chat token data; the row must not imply any."""
+        row = floating._rows([], {"age_seconds": 30}, max_rows=5)[0]
+        self.assertEqual(set(row), {"kind", "name", "status"})
         for word in ("token", "$", "%"):
-            self.assertNotIn(word, line)
+            self.assertNotIn(word, row["status"])
+
+    def test_no_chat_row_while_desktop_is_idle(self):
+        rows = floating._rows([self._session("a")], None, max_rows=5)
+        self.assertEqual([r["kind"] for r in rows], ["session"])
+
+    def test_chat_row_counts_toward_the_row_limit(self):
+        sessions = [self._session(str(i)) for i in range(9)]
+        self.assertEqual(len(floating._rows(sessions, {"age_seconds": 1}, max_rows=5)), 5)
 
 
 class TestStaleSnapshotsFromOtherSessions(unittest.TestCase):
@@ -1716,6 +2083,7 @@ class TestWidgetSnapshot(unittest.TestCase):
 
     def setUp(self):
         self.real = session_monitor.get_all_sessions
+        _hide_real_desktop(self)
 
     def tearDown(self):
         session_monitor.get_all_sessions = self.real

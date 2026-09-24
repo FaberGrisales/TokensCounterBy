@@ -161,7 +161,7 @@ def _budget_bar(percent, used_label, limit_label, length=10):
     return f"[{color}]{bar} {percent:.0f}%[/]\n[dim]{used_label} / {limit_label}[/]"
 
 
-def _plan_limit_cell(percent, resets_at, length=10):
+def _plan_limit_cell(percent, resets_at, length=10, estimated=False):
     """
     Claude's own plan-quota usage for one window, e.g. '████░░░░░░ 43%' over
     'resets 18:00'. Separate from _budget_bar because that one's second line
@@ -176,7 +176,8 @@ def _plan_limit_cell(percent, resets_at, length=10):
     cell = f"[{color}]{bar} {percent:.0f}%[/]"
     when = _parse_iso(resets_at)
     if when is not None:
-        cell += f"\n[dim]resets {when.astimezone().strftime('%b %d %H:%M')}[/]"
+        approx = "~" if estimated else ""
+        cell += f"\n[dim]resets {approx}{when.astimezone().strftime('%b %d %H:%M')}[/]"
     return cell
 
 
@@ -520,7 +521,8 @@ def _build_subscription_status_renderables(status, rolling_usage=None, plan_limi
             if has_plan:
                 entry = (plan_limits or {}).get(plan_windows[key])
                 budget_cell = [
-                    _plan_limit_cell(entry["used_percentage"], entry.get("resets_at"))
+                    _plan_limit_cell(entry["used_percentage"], entry.get("resets_at"),
+                                     estimated=bool(entry.get("resets_at_estimated")))
                     if entry else "[dim]n/a[/]"
                 ]
             elif has_budget:
@@ -569,10 +571,20 @@ def _build_subscription_status_renderables(status, rolling_usage=None, plan_limi
             # The cache only refreshes while a Claude Code session renders its
             # status line, so an old reading must say so rather than passing
             # for current.
-            style = "yellow" if age is not None and age > 300 else "dim"
+            sources = {w.get("source") for w in
+                       ((plan_limits or {}).get(f) for f in plan_windows.values()) if w}
+            if sources == {"desktop"}:
+                origin = ("recorded by Claude Desktop, which samples it every ~15 min while open; "
+                          "a '~' reset time is estimated from when usage started rising")
+                stale_after = 900 + 300
+            else:
+                origin = ("captured from Claude Code's status line, which only updates while a "
+                          "Claude Code session is running")
+                stale_after = 300
+            style = "yellow" if age is not None and age > stale_after else "dim"
             renderables.append(
-                f"[{style}]Plan Limit Used is Claude's own number, captured from Claude Code's status "
-                f"line ({freshness}). It only updates while a Claude Code session is running.[/]"
+                f"[{style}]Plan Limit Used is Claude's own account-wide number ({freshness}), "
+                f"{origin}.[/]"
             )
         renderables.append(
             "[dim]Time-in-Window % is real local elapsed time, NOT Claude Code's plan-quota %/usage limit "

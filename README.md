@@ -73,7 +73,7 @@ Una vez iniciado, verás el menú principal con las siguientes opciones:
 3. **Claude Code Config (MCP & Hooks)**: Qué servidores MCP y qué hooks tienes configurados para este proyecto, inspirado en los comandos `/mcp` y `/hooks` (ver sección de abajo).
 4. **Session Breakdown**: Elegís una sesión y ves, subagente por subagente y **llamada MCP por llamada MCP**, exactamente cuántos tokens/cuánto costó cada invocación individual (ver sección de abajo).
 5. **Cleanup Inactive Sessions**: Borra permanentemente sesiones locales sin actividad hace 7+ días, con selección manual y confirmación explícita (ver sección de abajo).
-6. **Floating Monitor**: Abre una ventana pequeña que se queda **encima de las demás ventanas**, con el consumo en vivo, para verlo mientras trabajas en otra aplicación. Para ver tu porcentaje real de plan, activa antes la Opción 7 (ver sección de abajo).
+6. **Floating Monitor**: Abre una ventana pequeña que se queda **encima de las demás ventanas**, con el consumo en vivo de Claude Code y la actividad de Claude Desktop, para verlo mientras trabajas en otra aplicación (ver sección de abajo).
 7. **Enable Real Plan Limits**: Activa la captura de tus porcentajes reales de límite de plan (5h y 7 días) desde Claude Code (ver sección de abajo).
 8. **Exit**: Cierra la aplicación.
 
@@ -227,39 +227,44 @@ Cómo funciona:
 
 ## 📌 Floating Monitor (Opción 6)
 
-> **Antes de usarla por primera vez, activa la Opción 7.** Sin ella la ventana funciona, pero en el encabezado solo verás tu gasto total en dólares en lugar del porcentaje real de tu plan. Ver [primeros pasos](#-primeros-pasos-recomendado) más arriba.
+Funciona tanto si usas **Claude Code** como **Claude Desktop** (o los dos). Si usas Claude Desktop, el porcentaje real de tu plan aparece sin configurar nada; si solo usas Claude Code, activa antes la Opción 7 para verlo.
 
 Una ventana pequeña (400×210) que se mantiene **siempre encima** del resto de ventanas, para dejarla en una esquina y seguir trabajando en el navegador o el editor sin perder de vista tu consumo. Se refresca sola cada 3 segundos.
 
 ```
-● 1 live   ○ 6 idle             │  5h 43% · resets 1h14m
-● TokensCounterBy    120.1K    $10.37   18%
-○ 916-app            933.1K   $242.63   61%
+● 2 live   ○ 4 idle           5h 74% · 7d 17% · resets ~3h35m
+●  chat  Resumen reunión…                      active 1m ago
+●  code  TokensCounterBy        1.4M   $224.83    20%
+○  desk  integracion-coti     297.7K     $6.50    76%
 ```
 
-**El encabezado** muestra, a la derecha del separador, lo mejor que haya disponible:
+**El encabezado** muestra, a la derecha, lo mejor que haya disponible:
 
 | Si… | Muestra |
 |---|---|
-| Activaste la Opción 7 y tu plan tiene límites | `5h 43% · resets 1h14m` — el porcentaje **real** de tu límite de 5 horas y cuánto falta para que se reinicie |
-| No, pero configuraste un presupuesto propio | `5h 64%` — tu consumo contra **tu** límite (ver Opción 2) |
+| Claude Desktop o la Opción 7 tienen una lectura de tu plan | `5h 74% · 7d 17% · resets 3h35m` — el porcentaje **real** de tus límites de 5 horas y 7 días, y cuánto falta para que se reinicie la ventana de 5h |
+| No, pero configuraste un presupuesto propio | `5h · 64%` — tu consumo contra **tu** límite (ver Opción 2) |
 | Ninguna de las dos | `$1,299.99` — tu gasto total |
 
-Si la lectura del plan tiene más de 5 minutos, sale con `?` (`5h 43%?`): el número no se actualiza mientras no haya una sesión de Claude Code abierta.
+De dónde sale el porcentaje del plan:
 
-**Las filas** priorizan Claude Code sobre Claude Desktop:
+- **Claude Desktop** lo guarda él mismo (`plan-usage-history.json`) cada ~15 minutos mientras está abierto. No trae hora de reinicio, así que se **estima** a partir de cuándo empezó a subir tu uso: por eso lleva `~` (`resets ~3h35m`), con un margen de unos 15 minutos y nunca prometiendo más tiempo del que tienes. El reinicio de 7 días no se estima.
+- **La Opción 7** (status line de Claude Code) da la hora de reinicio exacta mientras haya una sesión de Claude Code abierta.
+- Si están las dos, gana la lectura más reciente.
 
-- **Hay alguna sesión de Claude Code activa** → una fila por sesión con tokens, costo y porcentaje de ventana de contexto.
-- **No hay ninguna, pero usaste Claude Desktop en los últimos 5 minutos** → la ventana cambia a la vista de Desktop:
+Si la lectura es vieja (más de 5 minutos para Claude Code, más de 20 para Desktop), sale con `?` (`5h 43%?`).
 
-  ```
-  ● Claude Desktop                 │  5h 43% · resets 1h14m
-  Claude Desktop · active 2m ago
-  Desktop keeps no per-session token data. The 5h % above
-  covers your whole account, including Desktop.
-  ```
+**Las filas** muestran Claude Code y Claude Desktop a la vez:
 
-  Desktop solo puede decir **que lo estás usando**, nunca tokens ni costo: no guarda consumo por conversación en ningún archivo local. El porcentaje del encabezado sí incluye tu uso de Desktop, porque el límite es de toda la cuenta — pero solo está tan fresco como la última sesión de Claude Code que lo actualizó.
+| Etiqueta | Qué es | Qué muestra |
+|---|---|---|
+| `chat` | Claude Desktop, mientras lo usas (últimos 5 minutos) | **Solo que está activo.** Desktop no guarda tokens, costo ni contexto por conversación en ningún archivo local, así que no hay nada real que mostrar |
+| `code` | Una sesión de Claude Code (terminal o IDE) | Tokens, costo y porcentaje de la ventana de contexto |
+| `desk` | Una sesión de la pestaña **Code** de Claude Desktop | Lo mismo que `code`: por dentro es Claude Code |
+
+**Título del chat de Desktop (opcional).** La primera vez que abres la Opción 6, la app pregunta si quieres ver el título del chat de Desktop en el que estás. Viene **desactivado** porque los títulos se generan a partir de tus mensajes, y en todo lo demás la app nunca lee contenido de tus conversaciones. Se lee de la caché local de Desktop, sin mandar nada a ningún lado. Tu respuesta queda guardada en `~/.config/tokenscounterby/settings.json` (Windows: `%APPDATA%\TokensCounterBy\settings.json`; macOS: `~/Library/Application Support/TokensCounterBy/settings.json`); bórralo para que vuelva a preguntar.
+
+En **WSL**, la app también lee las sesiones y el Claude Desktop del lado de Windows (`C:\Users\<tú>\...`), porque ahí es donde escriben Desktop y cualquier Claude Code de Windows.
 
 Controles:
 
@@ -301,7 +306,7 @@ La instalación incluye `refreshInterval: 30`, así que mientras tengas una sesi
 
 - **No hay "tokens restantes".** Claude entrega solo `used_percentage` y `resets_at`. No existe ningún campo con cantidades absolutas de tokens, así que ese número no se puede mostrar.
 - **El dato puede estar viejo.** El cache solo se refresca mientras una sesión de Claude Code dibuja su status line. La app muestra hace cuánto se capturó, y el widget marca con `?` una lectura de más de 5 minutos.
-- **Nada lo refresca si no usas Claude Code.** Si trabajas solo en Claude Desktop, tus porcentajes sí suben en el servidor (los límites son de cuenta, no de cliente), pero nadie actualiza la copia local hasta que abras Claude Code. Se midió que `claude -p` **no** renderiza status line, así que un cron alrededor de eso gastaría cuota y no refrescaría nada.
+- **Nada lo refresca si no usas Claude Code.** Si trabajas solo en Claude Desktop, esta copia no se actualiza hasta que abras Claude Code — pero no hace falta: la app lee también el porcentaje que guarda Claude Desktop (ver Opción 6). Se midió que `claude -p` **no** renderiza status line, así que un cron alrededor de eso gastaría cuota y no refrescaría nada.
 - **No aplica a todo el mundo.** Con API key, Bedrock o Vertex, Claude Code informa `rate_limits_available: false` y no hay porcentaje que mostrar. La app lo dice en vez de inventar uno.
 
 Si algo no funciona, vuelve a entrar a la Opción 7: diagnostica la instalación (ruta con espacios sin comillas, venv borrado, repo movido) y te ofrece repararla.

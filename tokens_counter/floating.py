@@ -32,6 +32,14 @@ POLL_MS = 150
 # session is rendering, so an idle machine's number ages silently.
 STALE_AFTER_SECONDS = 300
 
+
+def _stale_after(window):
+    """Desktop only samples every ~15 min, so its readings age on that clock."""
+    if (window or {}).get("source") == "desktop":
+        from tokens_counter.claude_config import DESKTOP_SAMPLE_SECONDS
+        return DESKTOP_SAMPLE_SECONDS + STALE_AFTER_SECONDS
+    return STALE_AFTER_SECONDS
+
 # Dark, low-contrast palette: this window sits on top of whatever the user is
 # actually working on, so it should read at a glance without pulling focus.
 BG = "#11131a"
@@ -169,7 +177,7 @@ def _plan_headline(config_data, sessions=None):
     from tokens_counter import claude_config
 
     try:
-        limits = claude_config.get_plan_rate_limits()
+        limits = claude_config.get_best_plan_limits()
     except Exception:
         limits = None
 
@@ -181,15 +189,19 @@ def _plan_headline(config_data, sessions=None):
         age = five_hour.get("age_seconds")
         if age is None:
             age = (limits or {}).get("age_seconds")
-        stale = "?" if age is not None and age > STALE_AFTER_SECONDS else ""
+        stale = "?" if age is not None and age > _stale_after(five_hour) else ""
         # "5h 43% · resets 9m", not "5h:9m · 43%": juxtaposing the window name
         # with a duration reads as nonsense the moment the countdown is also
         # in hours ("5h:2h"), and a bare "9m left" beside a percentage reads
         # as remaining quota rather than time.
         left = _time_until(five_hour.get("resets_at"))
         label = f"5h {percent:.0f}%{stale}"
+        seven_day = (limits or {}).get("seven_day")
+        if seven_day:
+            label += f" · 7d {seven_day['used_percentage']:.0f}%"
         if left:
-            label += f" · resets {left}"
+            approx = "~" if five_hour.get("resets_at_estimated") else ""
+            label += f" · resets {approx}{left}"
         return label, _context_color(percent)
 
     from tokens_counter.config import load_budget
@@ -216,55 +228,61 @@ def _plan_headline(config_data, sessions=None):
         return "", DIM
 
 
-def _desktop_status(live_code_sessions):
+def _desktop_status(show_chat_title=False):
     """
-    Claude Desktop's activity, but only when it should be shown at all.
+    Claude Desktop's activity dict when it's been used recently, else None.
 
-    Returns the activity dict when there are no live Claude Code sessions AND
-    Desktop has been used recently, else None. Claude Code is always
-    preferred: it is the only source with real per-session numbers.
+    With `show_chat_title` (the user's opt-in), also `chat`: the active
+    chat's title/model from Desktop's cache, or None when it can't be read.
     """
-    if live_code_sessions:
-        return None
     from tokens_counter import claude_config
     try:
         activity = claude_config.get_desktop_activity()
     except Exception:
         return None
-    return activity if activity and activity.get("is_active") else None
+    if not (activity and activity.get("is_active")):
+        return None
+    if show_chat_title:
+        from tokens_counter import desktop_chats
+        try:
+            activity = {**activity,
+                        "chat": desktop_chats.get_active_chat(claude_config.claude_desktop_dir())}
+        except Exception:
+            activity = {**activity, "chat": None}
+    return activity
 
 
-def _desktop_takes_over(live_code_sessions):
-    return _desktop_status(live_code_sessions) is not None
-
-
-def _desktop_line(activity):
-    """'Claude Desktop · active 2m ago' - an activity line, never usage."""
+def _active_label(activity):
+    """'active 2m ago' - activity only, never usage."""
     age = (activity or {}).get("age_seconds")
     if age is None:
-        return "Claude Desktop · active"
+        return "active"
     if age < 60:
-        return "Claude Desktop · active now"
-    return f"Claude Desktop · active {int(age // 60)}m ago"
+        return "active now"
+    return f"active {int(age // 60)}m ago"
 
 
-def _render_desktop(rows_frame, header, activity):
-    import tkinter as tk
-    header.config(text="● Claude Desktop")
-    tk.Label(rows_frame, text=_desktop_line(activity), bg=BG, fg=FG,
-             font=("sans", 8), anchor="w").pack(fill="x", pady=(2, 4))
-    # Said once, plainly, so the missing session rows don't read as a bug:
-    # Desktop stores no per-chat token data, and the percentage in the
-    # header is account-wide - it includes Desktop use, but is only as fresh
-    # as the last Claude Code session that refreshed it.
-    tk.Label(rows_frame,
-             text="Desktop keeps no per-session token data. The 5h % above "
-                  "covers your whole account, including Desktop.",
-             bg=BG, fg=DIM, font=("sans", 7), anchor="w", justify="left",
-             wraplength=360).pack(fill="x")
+def _rows(sessions, desktop, max_rows):
+    """
+    What the window lists, top to bottom, as plain dicts (no tkinter).
+
+    A Desktop chat row comes first while Desktop is in use, alongside - never
+    instead of - the Claude Code sessions: chats keep no per-chat token data
+    anywhere on disk, so that row says only THAT Desktop is active. Code
+    sessions (terminal/IDE `code`, or Desktop's Code tab `desk`) keep their
+    full tokens / cost / context columns and fill the remaining rows.
+    """
+    rows = []
+    if desktop:
+        title = ((desktop.get("chat") or {}).get("title") or "").strip()
+        rows.append({"kind": "chat", "name": title or "Claude Desktop",
+                     "status": _active_label(desktop)})
+    for s in (sessions or [])[:max(0, max_rows - len(rows))]:
+        rows.append({"kind": "session", "session": s})
+    return rows
 
 
-def _collect_snapshot(config_data):
+def _collect_snapshot(config_data, show_chat_title=False):
     """
     Everything one refresh needs, gathered WITHOUT touching tkinter.
 
@@ -276,7 +294,7 @@ def _collect_snapshot(config_data):
     data and the UI thread does all the drawing.
 
     Returns a dict: `sessions`, `live`, `headline` (text, colour), `desktop`
-    (activity dict when the Desktop view should replace the rows, else None),
+    (activity dict while Desktop is in use, else None),
     and `error` (a message when the read failed, else None).
     """
     from tokens_counter import session_monitor
@@ -285,6 +303,14 @@ def _collect_snapshot(config_data):
     except Exception as e:
         return {"sessions": None, "live": 0, "headline": None, "desktop": None,
                 "error": str(e)}
+
+    from tokens_counter import claude_config
+    try:
+        desktop_ids = claude_config.get_desktop_code_session_ids()
+    except Exception:
+        desktop_ids = set()
+    for s in sessions:
+        s["origin"] = "desktop" if s["session_id"] in desktop_ids else "code"
 
     live = sum(1 for s in sessions if s["is_active"])
     try:
@@ -295,7 +321,7 @@ def _collect_snapshot(config_data):
         "sessions": sessions,
         "live": live,
         "headline": headline,
-        "desktop": _desktop_status(live),
+        "desktop": _desktop_status(show_chat_title),
         "error": None,
     }
 
@@ -309,7 +335,7 @@ def is_available():
         return False
 
 
-def run_floating_monitor(config_data, max_rows=5):
+def run_floating_monitor(config_data, max_rows=5, show_chat_title=False):
     """
     Open the floating window and block until the user closes it.
 
@@ -404,27 +430,37 @@ def run_floating_monitor(config_data, max_rows=5):
         for child in rows_frame.winfo_children():
             child.destroy()
 
-        # Claude Code first; Claude Desktop only when no Code session is live.
-        # Code sessions carry real per-session tokens and cost, so they win
-        # whenever there is one. Desktop can only ever say THAT it's in use.
-        if snapshot["desktop"]:
-            _render_desktop(rows_frame, header, snapshot["desktop"])
-            state["rendered"] = True
-            return
-
         sessions, live = snapshot["sessions"], snapshot["live"]
         header.config(text=f"● {live} live   ○ {len(sessions) - live} idle")
 
-        for s in sessions[:max_rows]:
-            name = os.path.basename(s["cwd"]) if s.get("cwd") else s["project"]
-            pct = s.get("context_percent")
-
+        for item in _rows(sessions, snapshot["desktop"], max_rows):
             row = tk.Frame(rows_frame, bg=BG)
             row.pack(fill="x", pady=1)
+
+            if item["kind"] == "chat":
+                # Desktop chats: activity only. No tokens, cost or context
+                # exist on disk for them, so none are shown.
+                tk.Label(row, text="●", bg=BG, fg=LIVE, font=("sans", 8)).pack(side="left")
+                tk.Label(row, text="chat", bg=BG, fg=DIM, font=("sans", 7), anchor="w",
+                         width=4).pack(side="left", padx=(4, 0))
+                tk.Label(row, text=item["name"][:16], bg=BG, fg=FG, font=("sans", 8),
+                         anchor="w", width=17).pack(side="left", padx=(4, 0))
+                tk.Label(row, text=item["status"], bg=BG, fg=DIM, font=("monospace", 8),
+                         anchor="e", width=21).pack(side="left")
+                continue
+
+            s = item["session"]
+            name = os.path.basename(s["cwd"]) if s.get("cwd") else s["project"]
+            pct = s.get("context_percent")
 
             tk.Label(row, text="●" if s["is_active"] else "○", bg=BG,
                      fg=LIVE if s["is_active"] else DIM,
                      font=("sans", 8)).pack(side="left")
+            # Which app the session was started from: both are real Claude
+            # Code transcripts, so tokens and context mean the same thing.
+            tk.Label(row, text="desk" if s.get("origin") == "desktop" else "code",
+                     bg=BG, fg=DIM, font=("sans", 7), anchor="w",
+                     width=4).pack(side="left", padx=(4, 0))
             tk.Label(row, text=name[:16], bg=BG, fg=FG, font=("sans", 8),
                      anchor="w", width=17).pack(side="left", padx=(4, 0))
             tk.Label(row, text=_fmt_tokens(s["input_tokens"] + s["output_tokens"]),
@@ -436,9 +472,9 @@ def run_floating_monitor(config_data, max_rows=5):
                      fg=_context_color(pct), font=("monospace", 8), anchor="e",
                      width=5).pack(side="left")
 
-        if not sessions:
-            tk.Label(rows_frame, text="No local Claude Code sessions found.", bg=BG,
-                     fg=DIM, font=("sans", 8), anchor="w").pack(fill="x")
+        if not sessions and not snapshot["desktop"]:
+            tk.Label(rows_frame, text="No Claude Code sessions or Desktop activity found.",
+                     bg=BG, fg=DIM, font=("sans", 8), anchor="w").pack(fill="x")
         state["rendered"] = True
 
     def refresh():
@@ -447,7 +483,7 @@ def run_floating_monitor(config_data, max_rows=5):
             return
         if state["worker"] is None or not state["worker"].is_alive():
             def work():
-                results.put(_collect_snapshot(config_data))
+                results.put(_collect_snapshot(config_data, show_chat_title))
             state["worker"] = threading.Thread(target=work, daemon=True)
             state["worker"].start()
         state["job"] = root.after(POLL_MS, poll)

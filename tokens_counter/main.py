@@ -5,7 +5,7 @@ from rich.prompt import Prompt
 # Add parent dir to path to ensure package works
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tokens_counter.config import load_config
+from tokens_counter.config import load_config, load_app_settings, save_app_settings
 from tokens_counter import session_monitor
 from tokens_counter import claude_config
 from tokens_counter import dependencies
@@ -248,8 +248,23 @@ def main():
                     input("\nPress Enter to return...")
                     continue
 
+            settings = load_app_settings()
+            if settings["show_desktop_chat_title"] is None:
+                # Asked once, then remembered: chat titles are generated from
+                # your messages, and nothing else in this app reads chat content.
+                tui.console.print(
+                    "The window can show the title of the Claude Desktop chat you're in.\n"
+                    "[dim]It reads Desktop's local cache on this machine (nothing is sent anywhere).\n"
+                    "Chat titles are generated from your messages. Desktop keeps no token data\n"
+                    "per chat, so the row still shows only that Desktop is active.[/]\n"
+                )
+                answer = Prompt.ask("Show the Desktop chat title?", choices=["y", "n"], default="n")
+                settings["show_desktop_chat_title"] = answer == "y"
+                save_app_settings(settings)
+
             tui.console.print("[dim]Opening the window. Close it to return to the menu.[/]")
-            ok, error = floating.run_floating_monitor(config_data)
+            ok, error = floating.run_floating_monitor(
+                config_data, show_chat_title=settings["show_desktop_chat_title"])
             if not ok:
                 tui.console.print(f"[bold red]Could not open the window:[/] {error}")
                 input("\nPress Enter to return...")
@@ -265,7 +280,7 @@ def main():
 
             report = claude_config.statusline_status_report()
             installed, current = report["ours"], report["command"]
-            limits = claude_config.get_plan_rate_limits()
+            limits = claude_config.get_best_plan_limits()
 
             if installed and report["problems"]:
                 # The whole point: a broken command fails silently inside
