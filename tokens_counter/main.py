@@ -29,7 +29,7 @@ def main():
 
         # Define menu choices
         menu_options = {
-            "1": "Live Session Monitor (Claude Code usage 🔎)",
+            "1": "Live Session Monitor (Claude Code + OpenCode 🔎)",
             "2": "Global Claude Usage (like /usage 📊)",
             "3": "Claude Code Config (MCP & Hooks 🔧)",
             "4": "Session Breakdown (subagents + MCP calls 🧩)",
@@ -57,7 +57,7 @@ def main():
             # usage per session, across every Claude Code window/tab running
             # under this subscription on this machine.
             tui.clear_screen()
-            tui.console.print("[bold green]=== LIVE SESSION MONITOR (Claude Code) ===[/]\n")
+            tui.console.print("[bold green]=== LIVE SESSION MONITOR (Claude Code + OpenCode) ===[/]\n")
             tui.console.print("[dim]Scanning local sessions under ~/.claude/projects ...[/]")
             tui.console.print("[yellow]Press Ctrl+C to stop and return to the menu.[/]\n")
             try:

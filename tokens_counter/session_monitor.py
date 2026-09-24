@@ -781,15 +781,28 @@ def apply_budgets(rolling_usage, budget):
     return rolling_usage
 
 
+def get_live_sessions(config_data, now=None):
+    """
+    Claude Code sessions plus OpenCode's, most recently active first - for
+    the live views (Option 1, floating window). The rest of the app (Session
+    Breakdown, Cleanup, usage windows) stays Claude Code only: OpenCode
+    sessions have no transcript files to break down or delete.
+    """
+    from tokens_counter.opencode_sessions import get_opencode_sessions
+    sessions = get_all_sessions(config_data, now=now) + get_opencode_sessions(now=now)
+    sessions.sort(key=lambda s: s["mtime"], reverse=True)
+    return sessions
+
+
 def watch_sessions(config_data, refresh_seconds=2):
     """Render a live-updating view of all local sessions until interrupted (Ctrl+C)."""
     from rich.live import Live
     from tokens_counter.tui import console, render_session_monitor_view
 
-    with Live(render_session_monitor_view(get_all_sessions(config_data)), console=console, refresh_per_second=4) as live:
+    with Live(render_session_monitor_view(get_live_sessions(config_data)), console=console, refresh_per_second=4) as live:
         while True:
             time.sleep(refresh_seconds)
-            live.update(render_session_monitor_view(get_all_sessions(config_data)))
+            live.update(render_session_monitor_view(get_live_sessions(config_data)))
 
 
 def watch_global_usage(config_data, refresh_seconds=5):

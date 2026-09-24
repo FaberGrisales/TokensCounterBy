@@ -48,11 +48,36 @@ def _diagnose_cpu():
         print("  _cpu_percent() raised:", repr(e))
 
 
+def _check_opencode(tmp):
+    """A real SQLite database in OpenCode's schema, at OpenCode's path."""
+    import sqlite3
+    import time
+    from tokens_counter.opencode_sessions import get_opencode_sessions, opencode_db_path
+    path = opencode_db_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    con = sqlite3.connect(path)
+    con.execute("create table session (id text, parent_id text, directory text, time_updated integer)")
+    con.execute("create table message (id text, session_id text, data text)")
+    now_ms = int(time.time() * 1000)
+    con.execute("insert into session values ('ses_1', null, ?, ?)", (os.path.join(tmp, "proj"), now_ms))
+    con.execute("insert into message values ('m1', 'ses_1', ?)", (json.dumps({
+        "role": "assistant", "providerID": "opencode", "modelID": "big-pickle", "cost": 0,
+        "time": {"created": now_ms}, "tokens": {"input": 120, "output": 30, "reasoning": 0,
+                                                "cache": {"read": 0, "write": 0}}}),))
+    con.commit()
+    con.close()
+    sessions = get_opencode_sessions()
+    check("opencode: sessions and tokens read from its database",
+          len(sessions) == 1 and sessions[0]["input_tokens"] == 120
+          and sessions[0]["models"] == ["opencode/big-pickle"], repr(sessions[:1]))
+
+
 def main():
     tmp = tempfile.mkdtemp()
     os.environ["CLAUDE_CONFIG_DIR"] = os.path.join(tmp, "claude")
     os.environ["TOKENS_COUNTER_CACHE"] = os.path.join(tmp, "cache.json")
     os.environ["TOKENS_COUNTER_SETTINGS"] = os.path.join(tmp, "settings.json")
+    os.environ["XDG_DATA_HOME"] = os.path.join(tmp, "xdg-data")
     print(f"platform={sys.platform} python={sys.version.split()[0]}", flush=True)
 
     from tokens_counter import system_stats, gpu_stats, claude_config
@@ -80,6 +105,7 @@ def main():
     config = load_config()
     check("sessions: empty config dir reads as no sessions",
           session_monitor.get_all_sessions(config) == [])
+    _check_opencode(tmp)
     check("desktop dir resolves", bool(claude_config.claude_desktop_dir()),
           claude_config.claude_desktop_dir())
 

@@ -28,15 +28,19 @@ _REAL_ENV = {}
 def setUpModule():
     """No test may read the developer's real Claude state."""
     _REAL_ENV["CLAUDE_CONFIG_DIR"] = os.environ.get("CLAUDE_CONFIG_DIR")
+    _REAL_ENV["XDG_DATA_HOME"] = os.environ.get("XDG_DATA_HOME")
     _REAL_ENV["tmp"] = tempfile.mkdtemp()
     os.environ["CLAUDE_CONFIG_DIR"] = _REAL_ENV["tmp"]
+    # OpenCode's database lives under XDG_DATA_HOME (or ~/.local/share).
+    os.environ["XDG_DATA_HOME"] = os.path.join(_REAL_ENV["tmp"], "xdg-data")
 
 
 def tearDownModule():
-    if _REAL_ENV["CLAUDE_CONFIG_DIR"] is None:
-        os.environ.pop("CLAUDE_CONFIG_DIR", None)
-    else:
-        os.environ["CLAUDE_CONFIG_DIR"] = _REAL_ENV["CLAUDE_CONFIG_DIR"]
+    for var in ("CLAUDE_CONFIG_DIR", "XDG_DATA_HOME"):
+        if _REAL_ENV[var] is None:
+            os.environ.pop(var, None)
+        else:
+            os.environ[var] = _REAL_ENV[var]
     shutil.rmtree(_REAL_ENV["tmp"], ignore_errors=True)
 
 
@@ -1462,6 +1466,111 @@ class TestGpuStats(unittest.TestCase):
             self.gs._linux_percent, self.gs._windows_percent, self.gs._run = real
 
 
+class TestOpenCodeSessions(unittest.TestCase):
+    """OpenCode's SQLite database, read-only, in the monitor's session shape."""
+
+    def setUp(self):
+        from tokens_counter import opencode_sessions
+        self.oc = opencode_sessions
+        self.tmp = tempfile.mkdtemp()
+        self.db = os.path.join(self.tmp, "opencode.db")
+        self.now = time.time()
+        opencode_sessions._cache.update(key=None, sessions=[])
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _build(self, sessions, messages):
+        import sqlite3
+        con = sqlite3.connect(self.db)
+        con.execute("create table session (id text, parent_id text, directory text, "
+                    "time_updated integer, title text)")
+        con.execute("create table message (id text, session_id text, data text)")
+        con.execute("create table part (id text, session_id text, data text)")
+        for sid, parent, directory, minutes_ago in sessions:
+            con.execute("insert into session values (?,?,?,?,?)",
+                        (sid, parent, directory, int((self.now - minutes_ago * 60) * 1000),
+                         "private title"))
+        for i, (sid, data) in enumerate(messages):
+            con.execute("insert into message values (?,?,?)", (f"m{i}", sid, json.dumps(data)))
+        con.execute("insert into part values ('p1', 's1', '{\"text\": \"PRIVATE PROMPT\"}')")
+        con.commit()
+        con.close()
+
+    def _reply(self, provider, model, inp, out, cost=0, reasoning=0, cache_read=0, minutes_ago=1):
+        stamp = int((self.now - minutes_ago * 60) * 1000)
+        return {"role": "assistant", "providerID": provider, "modelID": model, "cost": cost,
+                "time": {"created": stamp, "completed": stamp},
+                "tokens": {"input": inp, "output": out, "reasoning": reasoning,
+                           "cache": {"read": cache_read, "write": 0}}}
+
+    def test_sums_a_session_and_folds_in_its_subagents(self):
+        self._build(
+            [("s1", None, "/home/me/projects/api", 1), ("s1-child", "s1", "/home/me/projects/api", 2)],
+            [("s1", {"role": "user", "text": "PRIVATE PROMPT"}),
+             ("s1", self._reply("opencode", "big-pickle", 1000, 200, reasoning=50)),
+             ("s1-child", self._reply("openrouter", "qwen/qwen3-4b:free", 500, 100, cache_read=300))])
+        [s] = self.oc.get_opencode_sessions(self.db, now=self.now)
+        self.assertEqual((s["input_tokens"], s["output_tokens"], s["cache_read_tokens"]),
+                         (1500, 350, 300))
+        self.assertEqual(s["subagent_count"], 1)
+        self.assertEqual(s["models"], ["opencode/big-pickle", "openrouter/qwen/qwen3-4b:free"])
+        self.assertEqual((s["project"], s["origin"], s["context_percent"]), ("api", "opencode", None))
+        self.assertTrue(s["is_active"])
+        self.assertNotIn("PRIVATE", repr(s))
+
+    def test_paid_models_show_what_opencode_charged(self):
+        self._build([("s1", None, "/w", 1)],
+                    [("s1", self._reply("anthropic", "claude-sonnet-5", 1000, 100, cost=0.0123)),
+                     ("s1", self._reply("openai", "gpt-5", 2000, 100, cost=0.02))])
+        [s] = self.oc.get_opencode_sessions(self.db, now=self.now)
+        self.assertAlmostEqual(s["cost"], 0.0323)
+
+    def test_free_models_read_as_free_not_unpriced(self):
+        self._build([("s1", None, "/w", 1)], [("s1", self._reply("ollama", "qwen3.6:latest", 10, 5))])
+        [s] = self.oc.get_opencode_sessions(self.db, now=self.now)
+        self.assertEqual(s["cost"], 0.0)
+        self.assertEqual(floating._fmt_cost(s["cost"]), "free")
+        self.assertEqual(tui._fmt_cost(s["cost"], compact=True), "free")
+
+    def test_idle_and_empty_sessions(self):
+        self._build([("old", None, "/w", 60), ("empty", None, "/w", 1)],
+                    [("old", self._reply("opencode", "big-pickle", 10, 5, minutes_ago=60))])
+        sessions = self.oc.get_opencode_sessions(self.db, now=self.now)
+        self.assertEqual([s["session_id"] for s in sessions], ["old"])
+        self.assertFalse(sessions[0]["is_active"])
+
+    def test_windows_paths_give_the_folder_name(self):
+        self._build([("s1", None, "C:\\Users\\me\\Documents\\cotizar", 1)],
+                    [("s1", self._reply("opencode", "big-pickle", 10, 5))])
+        self.assertEqual(self.oc.get_opencode_sessions(self.db, now=self.now)[0]["project"], "cotizar")
+
+    def test_database_is_never_modified(self):
+        self._build([("s1", None, "/w", 1)], [("s1", self._reply("opencode", "big-pickle", 10, 5))])
+        with open(self.db, "rb") as f:
+            before = f.read()
+        self.oc.get_opencode_sessions(self.db, now=self.now)
+        with open(self.db, "rb") as f:
+            self.assertEqual(f.read(), before)
+
+    def test_missing_or_corrupt_database_gives_no_sessions(self):
+        self.assertEqual(self.oc.get_opencode_sessions(self.db, now=self.now), [])
+        with open(self.db, "wb") as f:
+            f.write(b"not a database" * 100)
+        self.assertEqual(self.oc.get_opencode_sessions(self.db, now=self.now), [])
+
+    def test_live_views_merge_opencode_with_claude_code(self):
+        self._build([("s1", None, "/w", 1)], [("s1", self._reply("opencode", "big-pickle", 10, 5))])
+        real = self.oc.opencode_db_path
+        self.oc.opencode_db_path = lambda: self.db
+        try:
+            sessions = session_monitor.get_live_sessions(load_config(), now=self.now)
+        finally:
+            self.oc.opencode_db_path = real
+        self.assertEqual([s["origin"] for s in sessions], ["opencode"])
+        self.assertEqual(floating.ORIGIN_TAGS[sessions[0]["origin"]], "open")
+
+
 class TestAppSettings(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
@@ -2280,7 +2389,7 @@ class TestWidgetSnapshot(unittest.TestCase):
         self.assertNotIn("tk.", inspect.getsource(floating._collect_snapshot))
 
     def test_a_read_failure_is_reported_not_raised(self):
-        def boom(_cfg):
+        def boom(_cfg, **_):
             raise OSError("disk went away")
         session_monitor.get_all_sessions = boom
         snapshot = floating._collect_snapshot(load_config())
@@ -2290,7 +2399,7 @@ class TestWidgetSnapshot(unittest.TestCase):
     def test_transcripts_are_scanned_once_per_refresh(self):
         """The headline's spend fallback reuses the loaded sessions instead of rescanning."""
         calls = []
-        def counting(cfg):
+        def counting(cfg, **_):
             calls.append(1)
             return []
         session_monitor.get_all_sessions = counting

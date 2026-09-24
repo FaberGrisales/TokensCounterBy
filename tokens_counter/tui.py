@@ -113,6 +113,10 @@ def _fmt_cost(cost, compact=False):
     """
     if cost is None:
         return "[dim]N/A[/]"
+    if cost == 0:
+        # Exactly zero is a reported "no charge" (an OpenCode free or local
+        # model), not a rounded-down real cost.
+        return "free"
     if not compact:
         return f"${cost:.4f}"
     return f"${cost:,.2f}" if cost >= 0.01 else "<$0.01"
@@ -254,7 +258,7 @@ def render_session_monitor_view(sessions):
 
     header = Panel(
         "\n".join(header_lines),
-        title="[bold cyan]Sessions[/]" if compact else "[bold cyan]Claude Code — Live Session Monitor[/]",
+        title="[bold cyan]Sessions[/]" if compact else "[bold cyan]Live Session Monitor — Claude Code + OpenCode[/]",
         border_style="cyan",
         box=box.DOUBLE,
         width=_panel_width(92)
@@ -320,17 +324,21 @@ def render_session_monitor_view(sessions):
     for s in sessions[:15]:
         status = "[bold green]● LIVE[/]" if s["is_active"] else "[dim]○ idle[/]"
         project_label = os.path.basename(s["cwd"]) if s.get("cwd") else s["project"]
-        session_label = f"{project_label}\n[dim]{s['session_id'][:8]}…[/]"
+        if s.get("origin") == "opencode":
+            # OpenCode ids share a time-ordered "ses_…" prefix; the tail differs.
+            session_label = f"{project_label}\n[dim]OpenCode · …{s['session_id'][-8:]}[/]"
+        else:
+            session_label = f"{project_label}\n[dim]{s['session_id'][:8]}…[/]"
 
         subagent_note = f" [dim](+{s['subagent_count']} subagent(s))[/]" if s["subagent_count"] else ""
         reqs = f"{s['main_requests']}{subagent_note}"
 
-        cost_str = f"${s['cost']:.4f}" if s["cost"] is not None else "[dim]N/A[/]"
+        cost_str = _fmt_cost(s["cost"])
 
         last_req = s.get("last_request")
         if last_req:
             last_tokens = f"{last_req['input_tokens']:,} / {last_req['output_tokens']:,}"
-            last_cost_str = f"${s['last_request_cost']:.4f}" if s.get("last_request_cost") is not None else "[dim]N/A[/]"
+            last_cost_str = _fmt_cost(s.get("last_request_cost"))
         else:
             last_tokens = "-"
             last_cost_str = "-"
@@ -348,7 +356,7 @@ def render_session_monitor_view(sessions):
         )
 
     if not sessions:
-        table.add_row("-", "No local Claude Code sessions found", "-", "-", "-", "-", "-", "-", "-")
+        table.add_row("-", "No local Claude Code or OpenCode sessions found", "-", "-", "-", "-", "-", "-", "-")
 
     footer = "[dim]Refreshing every few seconds · Press Ctrl+C to stop and return to the menu[/]"
 

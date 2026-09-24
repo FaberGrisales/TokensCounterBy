@@ -50,6 +50,10 @@ LIVE = "#4ade80"
 BAR_BG = "#2a2f3a"
 
 
+# Row tag per source: Claude Code, Claude Desktop's Code tab, OpenCode.
+ORIGIN_TAGS = {"code": "code", "desktop": "desk", "opencode": "open"}
+
+
 def _fmt_tokens(n):
     """Humanize a token count: 1234567 -> '1.2M'. Mirrors tui._fmt_tokens."""
     if n is None:
@@ -65,6 +69,8 @@ def _fmt_cost(cost):
     """Cost for a narrow column; never renders a real cost as a flat $0.00."""
     if cost is None:
         return "N/A"
+    if cost == 0:
+        return "free"
     return f"${cost:,.2f}" if cost >= 0.01 else "<$0.01"
 
 
@@ -314,7 +320,7 @@ def _collect_snapshot(config_data, show_chat_title=False):
     """
     from tokens_counter import session_monitor
     try:
-        sessions = session_monitor.get_all_sessions(config_data)
+        sessions = session_monitor.get_live_sessions(config_data)
     except Exception as e:
         return {"sessions": None, "live": 0, "headline": None, "desktop": None,
                 "system": None, "error": str(e)}
@@ -325,7 +331,8 @@ def _collect_snapshot(config_data, show_chat_title=False):
     except Exception:
         desktop_ids = set()
     for s in sessions:
-        s["origin"] = "desktop" if s["session_id"] in desktop_ids else "code"
+        if s.get("origin") != "opencode":
+            s["origin"] = "desktop" if s["session_id"] in desktop_ids else "code"
 
     live = sum(1 for s in sessions if s["is_active"])
     try:
@@ -490,7 +497,7 @@ def run_floating_monitor(config_data, max_rows=5, show_chat_title=False):
                      font=("sans", 8)).pack(side="left")
             # Which app the session was started from: both are real Claude
             # Code transcripts, so tokens and context mean the same thing.
-            tk.Label(row, text="desk" if s.get("origin") == "desktop" else "code",
+            tk.Label(row, text=ORIGIN_TAGS.get(s.get("origin"), "code"),
                      bg=BG, fg=DIM, font=("sans", 7), anchor="w",
                      width=4).pack(side="left", padx=(4, 0))
             tk.Label(row, text=name[:16], bg=BG, fg=FG, font=("sans", 8),
