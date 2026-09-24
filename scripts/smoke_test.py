@@ -29,6 +29,25 @@ def check(name, ok, detail=""):
         failures.append(name)
 
 
+def _diagnose_cpu():
+    import time
+    try:
+        import psutil
+    except ImportError:
+        print("  psutil not importable")
+        return
+    from tokens_counter import system_stats
+    for delay in (0.0, 0.2, 1.0):
+        time.sleep(delay)
+        t = psutil.cpu_times()
+        print(f"  cpu_times after {delay}s: {t} sum={sum(t)}")
+    try:
+        system_stats._last_cpu = None
+        print("  _cpu_percent():", system_stats._cpu_percent(psutil))
+    except Exception as e:
+        print("  _cpu_percent() raised:", repr(e))
+
+
 def main():
     tmp = tempfile.mkdtemp()
     os.environ["CLAUDE_CONFIG_DIR"] = os.path.join(tmp, "claude")
@@ -44,6 +63,8 @@ def main():
     parts = dict((label, text) for label, text, _ in system_stats.format_stats(stats))
     check("system stats: CPU/RAM read via psutil",
           "CPU" in parts and "RAM" in parts, json.dumps(parts))
+    if "CPU" not in parts:
+        _diagnose_cpu()
     gpu = gpu_stats.get_gpu_percent()
     # CI machines may have no GPU the OS reports on; the requirement is that
     # reading it never fails and never invents a number.
