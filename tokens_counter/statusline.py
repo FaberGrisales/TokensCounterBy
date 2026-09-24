@@ -260,7 +260,15 @@ def main():
     if model:
         parts.insert(0, model)
 
-    print(" · ".join(parts) if parts else "")
+    line = " · ".join(parts) if parts else ""
+    # Bytes, not print(): on Windows a piped stdout defaults to cp1252, which
+    # encodes the "·" separator as a byte Claude Code (reading UTF-8) renders
+    # as "�" in the status line.
+    try:
+        sys.stdout.buffer.write((line + "\n").encode("utf-8"))
+        sys.stdout.flush()
+    except Exception:
+        print(line)
 
 
 if __name__ == "__main__":

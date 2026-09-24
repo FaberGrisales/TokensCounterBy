@@ -1151,6 +1151,18 @@ class TestStatuslineScript(unittest.TestCase):
             result = self._run(payload)
             self.assertEqual(result.returncode, 0, f"failed on {payload!r}: {result.stderr}")
 
+    def test_output_is_utf8_on_every_platform(self):
+        """Claude Code reads UTF-8; Windows' cp1252 default turned "·" into "�"."""
+        import subprocess
+        script = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                              "tokens_counter", "statusline.py")
+        result = subprocess.run(
+            [sys.executable, script],
+            input=b'{"model":{"display_name":"Opus"},"rate_limits":{"five_hour":{"used_percentage":40}}}',
+            capture_output=True, timeout=30,
+            env={**os.environ, "TOKENS_COUNTER_CACHE": self.cache})
+        self.assertIn("Opus · 5h 40%".encode("utf-8"), result.stdout)
+
     def test_prints_the_percentages_it_captured(self):
         result = self._run('{"model":{"display_name":"Opus 5"},"rate_limits_available":true,'
                            '"rate_limits":{"five_hour":{"used_percentage":42.7},'
