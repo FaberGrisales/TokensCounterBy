@@ -1281,10 +1281,12 @@ class TestSystemStats(unittest.TestCase):
     def setUp(self):
         from tokens_counter import system_stats
         self.ss = system_stats
-        for name in ("_psutil", "_last_cpu", "_last_disk", "_FIRST_SAMPLE_SECONDS"):
+        for name in ("_psutil", "_gpu_percent", "_last_cpu", "_last_disk",
+                     "_FIRST_SAMPLE_SECONDS"):
             self.addCleanup(setattr, system_stats, name, getattr(system_stats, name))
         system_stats._last_cpu = system_stats._last_disk = None
         system_stats._FIRST_SAMPLE_SECONDS = 0
+        system_stats._gpu_percent = lambda: None
 
     def _fake_psutil(self, processes=()):
         """cpu_times advance 10s per call, 6.5s of it busy; disk moves 2MB per call."""
@@ -1350,10 +1352,16 @@ class TestSystemStats(unittest.TestCase):
     def test_formats_every_field(self):
         gb = 1024 ** 3
         stats = {"cpu_percent": 23.4, "ram_used": 12 * gb, "ram_total": 32 * gb,
-                 "ram_percent": 37.5, "disk_bytes_per_sec": 300 * 1024, "claude_rss": gb + gb // 2}
+                 "ram_percent": 37.5, "gpu_percent": 4.4, "disk_bytes_per_sec": 300 * 1024,
+                 "claude_rss": gb + gb // 2}
         self.assertEqual(self.ss.format_stats(stats), [
-            ("CPU", "23%", 23.4), ("RAM", "12.0/32.0 GB", 37.5),
+            ("CPU", "23%", 23.4), ("RAM", "12.0/32.0 GB", 37.5), ("GPU", "4%", 4.4),
             ("Disk", "300 KB/s", None), ("Claude", "1.5 GB", None)])
+
+    def test_gpu_shows_even_without_psutil(self):
+        self.ss._psutil = lambda: None
+        self.ss._gpu_percent = lambda: 12.0
+        self.assertEqual(self.ss.format_stats(self.ss.get_system_stats()), [("GPU", "12%", 12.0)])
 
     def test_claude_memory_sums_only_claude_processes(self):
         gb = 1024 ** 3
@@ -1379,6 +1387,52 @@ class _Times(tuple):
         obj = super().__new__(cls, (user, system, idle))
         obj.idle = idle
         return obj
+
+
+class TestGpuStats(unittest.TestCase):
+    """GPU % per platform; only the parsing is tested, never real hardware."""
+
+    def setUp(self):
+        from tokens_counter import gpu_stats
+        self.gs = gpu_stats
+
+    def test_busiest_engine_like_task_manager(self):
+        """Per-process instances of one engine add up; the busiest engine wins."""
+        samples = [
+            ("pid_10_luid_0x0_0x1_phys_0_eng_0_engtype_3D", 20.0),
+            ("pid_22_luid_0x0_0x1_phys_0_eng_0_engtype_3D", 15.5),
+            ("pid_10_luid_0x0_0x1_phys_0_eng_3_engtype_VideoDecode", 30.0),
+            ("pid_10_luid_0x0_0x1_phys_0_eng_5_engtype_Copy", 1.0),
+        ]
+        self.assertAlmostEqual(self.gs.busiest_engine_percent(samples), 35.5)
+
+    def test_busiest_engine_is_capped_and_empty_is_none(self):
+        self.assertEqual(self.gs.busiest_engine_percent(
+            [("pid_1_luid_0x0_0x1_phys_0_eng_0_engtype_3D", 140.0)]), 100.0)
+        self.assertIsNone(self.gs.busiest_engine_percent([]))
+        self.assertIsNone(self.gs.busiest_engine_percent([("garbage", 50.0)]))
+
+    def test_nvidia_smi_takes_the_busiest_gpu(self):
+        self.assertEqual(self.gs.parse_nvidia_smi("12\n87\n"), 87.0)
+        self.assertIsNone(self.gs.parse_nvidia_smi(None))
+        self.assertIsNone(self.gs.parse_nvidia_smi("[N/A]\n"))
+
+    def test_ioreg_device_utilization(self):
+        out = ('+-o AGXAcceleratorG13X  <class AGXAcceleratorG13X>\n'
+               '    "PerformanceStatistics" = {"In use system memory"=123,'
+               '"Device Utilization %"=42,"Renderer Utilization %"=40}\n')
+        self.assertEqual(self.gs.parse_ioreg(out), 42.0)
+        self.assertIsNone(self.gs.parse_ioreg(""))
+
+    def test_never_raises(self):
+        real = self.gs._linux_percent, self.gs._windows_percent, self.gs._run
+        try:
+            def boom(*_):
+                raise RuntimeError("no GPU driver")
+            self.gs._linux_percent = self.gs._windows_percent = self.gs._run = boom
+            self.assertIsNone(self.gs.get_gpu_percent())
+        finally:
+            self.gs._linux_percent, self.gs._windows_percent, self.gs._run = real
 
 
 class TestAppSettings(unittest.TestCase):

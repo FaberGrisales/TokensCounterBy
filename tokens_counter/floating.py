@@ -379,7 +379,7 @@ def run_floating_monitor(config_data, max_rows=5, show_chat_title=False):
 
     root.title("Tokens")
     root.configure(bg=BG)
-    root.geometry("400x232+80+80")
+    root.geometry("440x232+80+80")
     root.minsize(240, 120)
     root.attributes("-topmost", True)
 
@@ -456,7 +456,7 @@ def run_floating_monitor(config_data, max_rows=5, show_chat_title=False):
                      font=("sans", 7)).pack(side="left")
             tk.Label(stats_frame, text=text, bg=BG,
                      fg=FG if percent is None else _context_color(percent),
-                     font=("monospace", 8)).pack(side="left", padx=(2, 10))
+                     font=("monospace", 8)).pack(side="left", padx=(2, 8))
 
         for child in rows_frame.winfo_children():
             child.destroy()

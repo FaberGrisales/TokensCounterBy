@@ -1,10 +1,11 @@
 """
-CPU, RAM and disk activity for the floating window's top line.
+CPU, RAM, GPU and disk activity for the floating window's top line.
 
-Uses psutil, an OPTIONAL dependency (see dependencies.py): the standard
-library has no cross-platform way to read CPU or memory usage (Windows needs
-ctypes into kernel32, Linux /proc, macOS Mach calls). Without psutil,
-get_system_stats() returns None and the window simply omits the line.
+CPU/RAM/disk use psutil, an OPTIONAL dependency (see dependencies.py): the
+standard library has no cross-platform way to read them. GPU comes from
+gpu_stats.py (standard library only), so it shows even without psutil.
+When nothing at all can be read, get_system_stats() returns None and the
+window simply omits the line.
 """
 
 import time
@@ -92,23 +93,33 @@ def _disk_bytes_per_second(psutil):
     return max(0.0, (moved - prev_moved) / (now - prev_time))
 
 
+def _gpu_percent():
+    from tokens_counter.gpu_stats import get_gpu_percent
+    return get_gpu_percent()
+
+
 def get_system_stats():
     """
-    {"cpu_percent", "ram_used", "ram_total", "ram_percent",
+    {"cpu_percent", "ram_used", "ram_total", "ram_percent", "gpu_percent",
     "disk_bytes_per_sec", "claude_rss"} (bytes for sizes), or None when
-    psutil isn't installed.
+    nothing could be read.
 
     CPU and disk are rates since the previous call. The first CPU reading
     blocks for _FIRST_SAMPLE_SECONDS so it's never a fake 0%; the first disk
     reading is None (shown once the next refresh has a second sample).
     Never raises: any field it can't read is None.
     """
+    stats = {"cpu_percent": None, "ram_used": None, "ram_total": None,
+             "ram_percent": None, "gpu_percent": None, "disk_bytes_per_sec": None,
+             "claude_rss": None}
+    try:
+        stats["gpu_percent"] = _gpu_percent()
+    except Exception:
+        pass
+
     psutil = _psutil()
     if psutil is None:
-        return None
-
-    stats = {"cpu_percent": None, "ram_used": None, "ram_total": None,
-             "ram_percent": None, "disk_bytes_per_sec": None, "claude_rss": None}
+        return stats if stats["gpu_percent"] is not None else None
     try:
         stats["cpu_percent"] = _cpu_percent(psutil)
     except Exception:
@@ -155,6 +166,8 @@ def format_stats(stats):
     if stats.get("ram_used") is not None and stats.get("ram_total"):
         parts.append(("RAM", f"{_gb(stats['ram_used'])}/{_gb(stats['ram_total'])} GB",
                       stats.get("ram_percent")))
+    if stats.get("gpu_percent") is not None:
+        parts.append(("GPU", f"{stats['gpu_percent']:.0f}%", stats["gpu_percent"]))
     if stats.get("disk_bytes_per_sec") is not None:
         parts.append(("Disk", _rate(stats["disk_bytes_per_sec"]), None))
     if stats.get("claude_rss"):

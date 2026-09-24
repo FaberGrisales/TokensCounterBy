@@ -230,17 +230,17 @@ Cómo funciona:
 
 Funciona tanto si usas **Claude Code** como **Claude Desktop** (o los dos). Si usas Claude Desktop, el porcentaje real de tu plan aparece sin configurar nada; si solo usas Claude Code, activa antes la Opción 7 para verlo.
 
-Una ventana pequeña (400×232) que se mantiene **siempre encima** del resto de ventanas, para dejarla en una esquina y seguir trabajando en el navegador o el editor sin perder de vista tu consumo. Se refresca sola cada 3 segundos.
+Una ventana pequeña (440×232) que se mantiene **siempre encima** del resto de ventanas, para dejarla en una esquina y seguir trabajando en el navegador o el editor sin perder de vista tu consumo. Se refresca sola cada 3 segundos.
 
 ```
-CPU 74%   RAM 21.3/31.6 GB   Disk 1.2 MB/s   Claude 0.6 GB
+CPU 51%   RAM 23.0/31.6 GB   GPU 5%   Disk 294 KB/s   Claude 0.6 GB
 ● 2 live   ○ 4 idle           5h 74% · 7d 17% · resets ~3h35m
 ●  chat  Resumen reunión…                      active 1m ago
 ●  code  TokensCounterBy        1.4M   $224.83    20%
 ○  desk  integracion-coti     297.7K     $6.50    76%
 ```
 
-**La primera línea** muestra el uso de tu equipo, como el Administrador de tareas: **CPU**, **RAM** usada/total, actividad del **disco** (MB/s leídos + escritos, no cuánto espacio ocupa) y cuánta RAM usan los procesos de **Claude** (Desktop y Claude Code). CPU y RAM se ponen amarillas desde 50% y rojas desde 80%. Necesita `psutil`; si no lo tienes, la ventana funciona igual sin esta línea.
+**La primera línea** muestra el uso de tu equipo, como el Administrador de tareas: **CPU**, **RAM** usada/total, **GPU** (la del motor más ocupado, igual que el Administrador de tareas), actividad del **disco** (MB/s leídos + escritos, no cuánto espacio ocupa) y cuánta RAM usan los procesos de **Claude** (Desktop y Claude Code). CPU, RAM y GPU se ponen amarillas desde 50% y rojas desde 80%. CPU, RAM y disco necesitan `psutil`; la GPU no necesita nada. En Windows la GPU funciona con cualquier marca; en Linux, con NVIDIA (`nvidia-smi`) y AMD; en macOS, con `ioreg`. Lo que no se pueda leer simplemente no aparece.
 
 **El encabezado** muestra, a la derecha, lo mejor que haya disponible:
 
