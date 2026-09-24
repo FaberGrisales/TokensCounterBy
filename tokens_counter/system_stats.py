@@ -1,5 +1,5 @@
 """
-CPU, RAM and disk usage for the floating window's top line.
+CPU, RAM and disk activity for the floating window's top line.
 
 Uses psutil, an OPTIONAL dependency (see dependencies.py): the standard
 library has no cross-platform way to read CPU or memory usage (Windows needs
@@ -7,14 +7,15 @@ ctypes into kernel32, Linux /proc, macOS Mach calls). Without psutil,
 get_system_stats() returns None and the window simply omits the line.
 """
 
-import os
+import time
 
-# psutil's cpu_percent(interval=None) measures since the previous call and
-# returns a meaningless 0.0 on the very first one. The first call therefore
-# measures over a short blocking interval instead - fine, since the window
-# collects stats on a worker thread.
+# Previous (timestamp-free) samples for the rate readings below, kept here
+# rather than inside psutil: psutil 7.2 stores cpu_percent()'s last sample
+# per THREAD, and the floating window collects stats on a new worker thread
+# every refresh - so every call looked like a first call and read 0.0.
+_last_cpu = None      # (total_cpu_seconds, idle_cpu_seconds)
+_last_disk = None     # (monotonic_seconds, bytes_read + bytes_written)
 _FIRST_SAMPLE_SECONDS = 0.2
-_primed = False
 
 
 def _psutil():
@@ -47,13 +48,59 @@ def _claude_process_rss(psutil):
     return total
 
 
+def _cpu_sample(psutil):
+    t = psutil.cpu_times()
+    # Same accounting as psutil's own cpu_percent: busy = total - idle - iowait.
+    idle = t.idle + getattr(t, "iowait", 0.0)
+    return sum(t), idle
+
+
+def _cpu_percent(psutil):
+    global _last_cpu
+    if _last_cpu is None:
+        _last_cpu = _cpu_sample(psutil)
+        time.sleep(_FIRST_SAMPLE_SECONDS)
+    total, idle = _cpu_sample(psutil)
+    prev_total, prev_idle = _last_cpu
+    _last_cpu = (total, idle)
+    elapsed = total - prev_total
+    if elapsed <= 0:
+        return None
+    busy = elapsed - (idle - prev_idle)
+    return max(0.0, min(100.0, busy / elapsed * 100))
+
+
+def _disk_bytes_per_second(psutil):
+    """
+    Read + write throughput across all disks - activity, like Task Manager's
+    Disk column, not how full a disk is. psutil exposes no cross-platform
+    "active time" percentage (busy_time is Linux-only), so this is a rate.
+    """
+    global _last_disk
+    io = psutil.disk_io_counters()
+    if io is None:
+        return None
+    now = time.monotonic()
+    moved = io.read_bytes + io.write_bytes
+    if _last_disk is None:
+        _last_disk = (now, moved)
+        return None
+    prev_time, prev_moved = _last_disk
+    _last_disk = (now, moved)
+    if now <= prev_time:
+        return None
+    return max(0.0, (moved - prev_moved) / (now - prev_time))
+
+
 def get_system_stats():
     """
-    {"cpu_percent", "ram_used", "ram_total", "ram_percent", "disk_percent",
-    "claude_rss"} (bytes for sizes), or None when psutil isn't installed.
+    {"cpu_percent", "ram_used", "ram_total", "ram_percent",
+    "disk_bytes_per_sec", "claude_rss"} (bytes for sizes), or None when
+    psutil isn't installed.
 
-    `cpu_percent` is the usage since the previous call; the first call
-    blocks for _FIRST_SAMPLE_SECONDS so it never reports a fake 0%.
+    CPU and disk are rates since the previous call. The first CPU reading
+    blocks for _FIRST_SAMPLE_SECONDS so it's never a fake 0%; the first disk
+    reading is None (shown once the next refresh has a second sample).
     Never raises: any field it can't read is None.
     """
     psutil = _psutil()
@@ -61,12 +108,9 @@ def get_system_stats():
         return None
 
     stats = {"cpu_percent": None, "ram_used": None, "ram_total": None,
-             "ram_percent": None, "disk_percent": None, "claude_rss": None}
-    global _primed
+             "ram_percent": None, "disk_bytes_per_sec": None, "claude_rss": None}
     try:
-        stats["cpu_percent"] = psutil.cpu_percent(
-            interval=None if _primed else _FIRST_SAMPLE_SECONDS)
-        _primed = True
+        stats["cpu_percent"] = _cpu_percent(psutil)
     except Exception:
         pass
     try:
@@ -76,7 +120,7 @@ def get_system_stats():
     except Exception:
         pass
     try:
-        stats["disk_percent"] = psutil.disk_usage(os.path.expanduser("~")).percent
+        stats["disk_bytes_per_sec"] = _disk_bytes_per_second(psutil)
     except Exception:
         pass
     try:
@@ -84,6 +128,12 @@ def get_system_stats():
     except Exception:
         pass
     return stats
+
+
+def _rate(bytes_per_sec):
+    if bytes_per_sec >= 1024 ** 2:
+        return f"{bytes_per_sec / 1024 ** 2:.1f} MB/s"
+    return f"{bytes_per_sec / 1024:.0f} KB/s"
 
 
 def _gb(value):
@@ -105,8 +155,8 @@ def format_stats(stats):
     if stats.get("ram_used") is not None and stats.get("ram_total"):
         parts.append(("RAM", f"{_gb(stats['ram_used'])}/{_gb(stats['ram_total'])} GB",
                       stats.get("ram_percent")))
-    if stats.get("disk_percent") is not None:
-        parts.append(("Disk", f"{stats['disk_percent']:.0f}%", stats["disk_percent"]))
+    if stats.get("disk_bytes_per_sec") is not None:
+        parts.append(("Disk", _rate(stats["disk_bytes_per_sec"]), None))
     if stats.get("claude_rss"):
         parts.append(("Claude", f"{_gb(stats['claude_rss'])} GB", None))
     return parts

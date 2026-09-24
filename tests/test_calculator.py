@@ -1281,10 +1281,15 @@ class TestSystemStats(unittest.TestCase):
     def setUp(self):
         from tokens_counter import system_stats
         self.ss = system_stats
-        self.addCleanup(setattr, system_stats, "_psutil", system_stats._psutil)
+        for name in ("_psutil", "_last_cpu", "_last_disk", "_FIRST_SAMPLE_SECONDS"):
+            self.addCleanup(setattr, system_stats, name, getattr(system_stats, name))
+        system_stats._last_cpu = system_stats._last_disk = None
+        system_stats._FIRST_SAMPLE_SECONDS = 0
 
-    def _fake_psutil(self, processes):
+    def _fake_psutil(self, processes=()):
+        """cpu_times advance 10s per call, 6.5s of it busy; disk moves 2MB per call."""
         from types import SimpleNamespace as NS
+        state = {"cpu": 0, "disk": 0}
 
         class Error(Exception):
             pass
@@ -1293,12 +1298,19 @@ class TestSystemStats(unittest.TestCase):
             def __init__(self, name, rss):
                 self.info = {"name": name, "memory_info": NS(rss=rss)}
 
+        def cpu_times():
+            state["cpu"] += 1
+            n = state["cpu"]
+            return _Times(4.0 * n, 2.5 * n, 3.5 * n)
+
+        def disk_io_counters():
+            state["disk"] += 1
+            return NS(read_bytes=state["disk"] * 1024 ** 2, write_bytes=state["disk"] * 1024 ** 2)
+
         gb = 1024 ** 3
         return NS(
-            Error=Error,
-            cpu_percent=lambda interval=None: 23.4,
+            Error=Error, cpu_times=cpu_times, disk_io_counters=disk_io_counters,
             virtual_memory=lambda: NS(total=32 * gb, available=20 * gb, percent=37.5),
-            disk_usage=lambda path: NS(percent=61.0),
             process_iter=lambda attrs: [Proc(n, r) for n, r in processes],
         )
 
@@ -1307,19 +1319,51 @@ class TestSystemStats(unittest.TestCase):
         self.assertIsNone(self.ss.get_system_stats())
         self.assertEqual(self.ss.format_stats(None), [])
 
-    def test_reads_cpu_ram_disk_and_claude_memory(self):
+    def test_cpu_is_real_on_every_refresh_thread(self):
+        """
+        psutil 7.2 keeps cpu_percent()'s last sample per thread, and the
+        window reads stats on a new thread every refresh: every reading after
+        the first came back 0.0 while the machine sat at 60-90%.
+        """
+        import threading
+        fake = self._fake_psutil()
+        self.ss._psutil = lambda: fake
+        readings = []
+        for _ in range(3):
+            t = threading.Thread(target=lambda: readings.append(
+                self.ss.get_system_stats()["cpu_percent"]))
+            t.start()
+            t.join()
+        for value in readings:
+            self.assertAlmostEqual(value, 65.0)
+
+    def test_disk_is_activity_not_how_full_it_is(self):
+        """A 95%-full but idle disk must not read as 95% - Task Manager shows activity."""
+        fake = self._fake_psutil()
+        self.ss._psutil = lambda: fake
+        self.assertIsNone(self.ss.get_system_stats()["disk_bytes_per_sec"])
+        rate = self.ss.get_system_stats()["disk_bytes_per_sec"]
+        self.assertGreater(rate, 0)
+        disk = dict((p[0], p[1]) for p in self.ss.format_stats({"disk_bytes_per_sec": 2.5 * 1024 ** 2}))
+        self.assertEqual(disk["Disk"], "2.5 MB/s")
+
+    def test_formats_every_field(self):
         gb = 1024 ** 3
-        self.ss._psutil = lambda: self._fake_psutil(
-            [("Claude.exe", gb), ("claude", gb // 2), ("chrome.exe", 5 * gb)])
-        stats = self.ss.get_system_stats()
-        self.assertEqual(stats["claude_rss"], gb + gb // 2)
+        stats = {"cpu_percent": 23.4, "ram_used": 12 * gb, "ram_total": 32 * gb,
+                 "ram_percent": 37.5, "disk_bytes_per_sec": 300 * 1024, "claude_rss": gb + gb // 2}
         self.assertEqual(self.ss.format_stats(stats), [
             ("CPU", "23%", 23.4), ("RAM", "12.0/32.0 GB", 37.5),
-            ("Disk", "61%", 61.0), ("Claude", "1.5 GB", None)])
+            ("Disk", "300 KB/s", None), ("Claude", "1.5 GB", None)])
+
+    def test_claude_memory_sums_only_claude_processes(self):
+        gb = 1024 ** 3
+        fake = self._fake_psutil([("Claude.exe", gb), ("claude", gb // 2), ("chrome.exe", 5 * gb)])
+        self.ss._psutil = lambda: fake
+        self.assertEqual(self.ss.get_system_stats()["claude_rss"], gb + gb // 2)
 
     def test_unreadable_fields_are_left_out_not_zeroed(self):
         parts = self.ss.format_stats({"cpu_percent": 5.0, "ram_used": None, "ram_total": None,
-                                      "ram_percent": None, "disk_percent": None,
+                                      "ram_percent": None, "disk_bytes_per_sec": None,
                                       "claude_rss": 0})
         self.assertEqual([p[0] for p in parts], ["CPU"])
 
@@ -1327,6 +1371,14 @@ class TestSystemStats(unittest.TestCase):
         dep = next(d for d in dependencies.check_dependencies() if d["module"] == "psutil")
         self.assertFalse(dep["required"])
         self.assertEqual(dep["command"][-3:], ["pip", "install", "psutil"])
+
+
+class _Times(tuple):
+    """Stand-in for psutil's cpu_times() namedtuple: iterable, with .idle."""
+    def __new__(cls, user, system, idle):
+        obj = super().__new__(cls, (user, system, idle))
+        obj.idle = idle
+        return obj
 
 
 class TestAppSettings(unittest.TestCase):

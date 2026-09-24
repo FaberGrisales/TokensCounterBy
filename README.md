@@ -233,14 +233,14 @@ Funciona tanto si usas **Claude Code** como **Claude Desktop** (o los dos). Si u
 Una ventana pequeña (400×232) que se mantiene **siempre encima** del resto de ventanas, para dejarla en una esquina y seguir trabajando en el navegador o el editor sin perder de vista tu consumo. Se refresca sola cada 3 segundos.
 
 ```
-CPU 23%   RAM 19.5/31.6 GB   Disk 95%   Claude 0.6 GB
+CPU 74%   RAM 21.3/31.6 GB   Disk 1.2 MB/s   Claude 0.6 GB
 ● 2 live   ○ 4 idle           5h 74% · 7d 17% · resets ~3h35m
 ●  chat  Resumen reunión…                      active 1m ago
 ●  code  TokensCounterBy        1.4M   $224.83    20%
 ○  desk  integracion-coti     297.7K     $6.50    76%
 ```
 
-**La primera línea** muestra el uso de tu equipo: **CPU**, **RAM** usada/total, **disco** (de la unidad de tu carpeta de usuario) y cuánta RAM usan los procesos de **Claude** (Desktop y Claude Code). Se pone amarillo desde 50% y rojo desde 80%. Necesita `psutil`; si no lo tienes, la ventana funciona igual sin esta línea.
+**La primera línea** muestra el uso de tu equipo, como el Administrador de tareas: **CPU**, **RAM** usada/total, actividad del **disco** (MB/s leídos + escritos, no cuánto espacio ocupa) y cuánta RAM usan los procesos de **Claude** (Desktop y Claude Code). CPU y RAM se ponen amarillas desde 50% y rojas desde 80%. Necesita `psutil`; si no lo tienes, la ventana funciona igual sin esta línea.
 
 **El encabezado** muestra, a la derecha, lo mejor que haya disponible:
 
