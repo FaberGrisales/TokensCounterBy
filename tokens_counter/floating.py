@@ -262,6 +262,11 @@ def _active_label(activity):
     return f"active {int(age // 60)}m ago"
 
 
+def _header_counts(sessions, live_sessions, desktop):
+    """(live, idle) for the header; an active Desktop counts as one live."""
+    return live_sessions + (1 if desktop else 0), len(sessions or []) - live_sessions
+
+
 def _rows(sessions, desktop, max_rows):
     """
     What the window lists, top to bottom, as plain dicts (no tkinter).
@@ -430,8 +435,9 @@ def run_floating_monitor(config_data, max_rows=5, show_chat_title=False):
         for child in rows_frame.winfo_children():
             child.destroy()
 
-        sessions, live = snapshot["sessions"], snapshot["live"]
-        header.config(text=f"● {live} live   ○ {len(sessions) - live} idle")
+        sessions = snapshot["sessions"]
+        live, idle = _header_counts(sessions, snapshot["live"], snapshot["desktop"])
+        header.config(text=f"● {live} live   ○ {idle} idle")
 
         for item in _rows(sessions, snapshot["desktop"], max_rows):
             row = tk.Frame(rows_frame, bg=BG)

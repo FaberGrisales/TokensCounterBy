@@ -1998,6 +1998,12 @@ class TestDesktopFallback(unittest.TestCase):
         rows = floating._rows([self._session("a")], None, max_rows=5)
         self.assertEqual([r["kind"] for r in rows], ["session"])
 
+    def test_active_desktop_counts_as_live(self):
+        sessions = [self._session("a"), self._session("b")]
+        self.assertEqual(floating._header_counts(sessions, 0, {"age_seconds": 5}), (1, 2))
+        self.assertEqual(floating._header_counts(sessions, 1, {"age_seconds": 5}), (2, 1))
+        self.assertEqual(floating._header_counts(sessions, 1, None), (1, 1))
+
     def test_chat_row_counts_toward_the_row_limit(self):
         sessions = [self._session(str(i)) for i in range(9)]
         self.assertEqual(len(floating._rows(sessions, {"age_seconds": 1}, max_rows=5)), 5)
