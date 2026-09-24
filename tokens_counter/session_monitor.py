@@ -31,56 +31,26 @@ def get_claude_config_dir():
     return Path(os.environ.get("CLAUDE_CONFIG_DIR", os.path.expanduser("~/.claude")))
 
 
-WSL_WINDOWS_USERS_ROOT = "/mnt/c/Users"
-
-
-def is_wsl():
-    import platform
-    return "microsoft" in platform.release().lower()
-
-
-def get_session_roots(wsl_users_root=None):
-    """
-    Every Claude config dir whose `projects/` holds this machine's sessions.
-
-    Normally just get_claude_config_dir(). Under WSL, Claude Desktop and any
-    Windows-side Claude Code write to the Windows home's `.claude`
-    (/mnt/c/Users/<user>/.claude), which the Linux ~/.claude never sees, so
-    those are added. An explicit CLAUDE_CONFIG_DIR means "exactly this one"
-    and is honoured as-is - which also keeps the tests hermetic.
-    """
-    roots = [get_claude_config_dir()]
-    if "CLAUDE_CONFIG_DIR" in os.environ:
-        return roots
-    if wsl_users_root is not None or is_wsl():
-        import glob
-        pattern = os.path.join(wsl_users_root or WSL_WINDOWS_USERS_ROOT, "*", ".claude")
-        roots += [Path(p) for p in sorted(glob.glob(pattern))
-                  if os.path.isdir(os.path.join(p, "projects"))]
-    return roots
-
-
 def find_session_groups():
     """
     Find every local Claude Code session, grouping each top-level transcript
     with any subagent/workflow transcripts nested under its own directory.
     Returns a list of {"main": Path, "subagents": [Path, ...]}.
     """
-    project_dirs = []
-    for root in get_session_roots():
-        projects_dir = root / "projects"
-        if not projects_dir.is_dir():
-            continue
-        try:
-            project_dirs += [p for p in projects_dir.iterdir() if p.is_dir()]
-        except OSError:
-            continue
+    projects_dir = get_claude_config_dir() / "projects"
+    if not projects_dir.is_dir():
+        return []
+    try:
+        project_dirs = [p for p in projects_dir.iterdir() if p.is_dir()]
+    except OSError:
+        return []
 
     groups = []
 
     for project_dir in project_dirs:
         # scandir, not iterdir + is_file: DirEntry types come from readdir,
-        # while Path.is_file() is one stat per entry - ~12ms each over /mnt/c.
+        # while Path.is_file() is one stat per entry - ~12ms each on a slow
+        # (network/virtualized) filesystem.
         try:
             with os.scandir(project_dir) as it:
                 entries = list(it)
@@ -104,8 +74,8 @@ def find_session_groups():
 
 # path -> ((st_mtime_ns, st_size), [usage dicts]). Live views re-read every
 # transcript every few seconds; a stat per file is ~100x cheaper than a
-# re-parse (165MB of Windows-side transcripts over WSL's /mnt/c: ~6s to parse,
-# ~0.3s to stat), and only files that actually changed get parsed again.
+# re-parse (165MB of transcripts on a slow mounted drive: ~6s to parse, ~0.3s
+# to stat), and only files that actually changed get parsed again.
 # Callers only read the cached dicts - never mutate them.
 _USAGE_CACHE = {}
 
@@ -131,8 +101,8 @@ def _scan(groups):
     """
     Parse every transcript in `groups` concurrently before a serial pass.
 
-    The work is I/O-bound: over WSL's /mnt/c each stat and read waits on the
-    9P bridge, and 8 threads read the same 93MB in 1.4s instead of 5.9s.
+    The work is I/O-bound: on a slow filesystem each stat and read waits on
+    the disk, and 8 threads read the same 93MB in 1.4s instead of 5.9s.
     The serial code afterwards then only hits _USAGE_CACHE / _SCAN_STATS.
     """
     global _SCAN_STATS

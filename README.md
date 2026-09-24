@@ -264,7 +264,7 @@ Si la lectura es vieja (más de 5 minutos para Claude Code, más de 20 para Desk
 
 **Título del chat de Desktop (opcional).** La primera vez que abres la Opción 6, la app pregunta si quieres ver el título del chat de Desktop en el que estás. Viene **desactivado** porque los títulos se generan a partir de tus mensajes, y en todo lo demás la app nunca lee contenido de tus conversaciones. Se lee de la caché local de Desktop, sin mandar nada a ningún lado. Tu respuesta queda guardada en `~/.config/tokenscounterby/settings.json` (Windows: `%APPDATA%\TokensCounterBy\settings.json`; macOS: `~/Library/Application Support/TokensCounterBy/settings.json`); bórralo para que vuelva a preguntar.
 
-En **WSL**, la app también lee las sesiones y el Claude Desktop del lado de Windows (`C:\Users\<tú>\...`), porque ahí es donde escriben Desktop y cualquier Claude Code de Windows.
+Funciona en Windows, macOS y Linux, corriendo la app directamente en el sistema operativo (en Windows, con Python de Windows; WSL no está soportado).
 
 Controles:
 

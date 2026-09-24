@@ -1,7 +1,7 @@
 import json
 import os
 
-from tokens_counter.session_monitor import get_claude_config_dir, is_wsl, WSL_WINDOWS_USERS_ROOT
+from tokens_counter.session_monitor import get_claude_config_dir
 
 # Read-only, best-effort readers for Claude Code's own local configuration
 # (MCP servers, hooks) — the same data the real `/mcp` and `/hooks` commands
@@ -263,7 +263,11 @@ def _stable_python():
     if in_venv:
         for name in ("python3", "python"):
             found = shutil.which(name)
-            if found and not found.startswith(sys.prefix):
+            # WindowsApps\python*.exe are Microsoft Store stubs: they open the
+            # Store instead of running Python, so the status line would stay
+            # blank with no error anywhere.
+            if (found and not found.startswith(sys.prefix)
+                    and "windowsapps" not in found.lower()):
                 return found
     return sys.executable
 
@@ -445,46 +449,31 @@ def install_statusline(settings_path=None):
 DESKTOP_ACTIVITY_SUBDIRS = ("IndexedDB", "Local Storage", "Session Storage", "WebStorage")
 
 
-def _windows_desktop_dirs(appdata_roaming_dirs, appdata_local_dirs):
+def _windows_desktop_dirs(roaming, local):
     """
     Desktop profile candidates on Windows. The Microsoft Store (MSIX) build
     doesn't use %APPDATA%\\Claude: Windows virtualizes it under
     %LOCALAPPDATA%\\Packages\\Claude_<publisher-hash>\\LocalCache\\Roaming\\Claude.
     """
     import glob
-    candidates = [os.path.join(d, "Claude") for d in appdata_roaming_dirs]
-    for local in appdata_local_dirs:
-        candidates += glob.glob(os.path.join(local, "Packages", "Claude_*",
-                                             "LocalCache", "Roaming", "Claude"))
-    return candidates
+    return [os.path.join(roaming, "Claude")] + glob.glob(
+        os.path.join(local, "Packages", "Claude_*", "LocalCache", "Roaming", "Claude"))
 
 
-def claude_desktop_dir(wsl_users_root=None):
-    """
-    Claude Desktop's profile directory for this platform (it may not exist).
-
-    Under WSL, Desktop is the Windows app, so its profile lives on the Windows
-    side (/mnt/c/Users/<user>/...), never in the Linux ~/.config.
-    """
-    import glob
+def claude_desktop_dir():
+    """Claude Desktop's profile directory for this platform (it may not exist)."""
     import sys
     if sys.platform == "darwin":
         return os.path.expanduser("~/Library/Application Support/Claude")
-    if sys.platform == "win32":
-        roaming = os.environ.get("APPDATA") or os.path.expanduser("~\\AppData\\Roaming")
-        local = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~\\AppData\\Local")
-        candidates = _windows_desktop_dirs([roaming], [local])
-    else:
+    if sys.platform != "win32":
         base = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
-        candidates = [os.path.join(base, "Claude")]
-        if wsl_users_root is not None or is_wsl():
-            users = glob.glob(os.path.join(wsl_users_root or WSL_WINDOWS_USERS_ROOT, "*"))
-            candidates += _windows_desktop_dirs(
-                [os.path.join(u, "AppData", "Roaming") for u in users],
-                [os.path.join(u, "AppData", "Local") for u in users])
+        return os.path.join(base, "Claude")
+    roaming = os.environ.get("APPDATA") or os.path.expanduser("~\\AppData\\Roaming")
+    local = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~\\AppData\\Local")
+    candidates = _windows_desktop_dirs(roaming, local)
     existing = [c for c in candidates if os.path.isdir(c)]
-    # Several Windows accounts can each have Desktop; the most recently
-    # touched profile is the one actually in use.
+    # Both installers can leave a profile behind; the most recently touched
+    # one is the one actually in use.
     return max(existing, key=os.path.getmtime) if existing else candidates[0]
 
 
@@ -522,8 +511,8 @@ def get_desktop_activity(desktop_dir=None, now=None, active_seconds=None):
         for dirpath, dirnames, filenames in os.walk(base):
             # *.indexeddb.blob holds attachments in hundreds of near-empty
             # dirs; every blob write also appends to the sibling leveldb log,
-            # so skipping it loses nothing and cuts a /mnt/c scan from ~4s to
-            # ~0.3s.
+            # so skipping it loses nothing and cut a scan on a slow drive from
+            # ~4s to ~0.3s.
             dirnames[:] = [d for d in dirnames if not d.endswith(".blob")]
             for name in filenames:
                 try:

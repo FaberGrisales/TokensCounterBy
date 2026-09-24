@@ -26,12 +26,7 @@ _REAL_ENV = {}
 
 
 def setUpModule():
-    """
-    No test may read the developer's real Claude state. An explicit, empty
-    CLAUDE_CONFIG_DIR also turns off the WSL lookup of the Windows home's
-    .claude (see session_monitor.get_session_roots), which otherwise pulled
-    real transcripts over /mnt/c into tests that don't set one themselves.
-    """
+    """No test may read the developer's real Claude state."""
     _REAL_ENV["CLAUDE_CONFIG_DIR"] = os.environ.get("CLAUDE_CONFIG_DIR")
     _REAL_ENV["tmp"] = tempfile.mkdtemp()
     os.environ["CLAUDE_CONFIG_DIR"] = _REAL_ENV["tmp"]
@@ -605,13 +600,16 @@ class TestClaudeConfig(unittest.TestCase):
         os.makedirs(self.fake_home, exist_ok=True)
         os.makedirs(self.fake_claude_dir, exist_ok=True)
 
-        self._prev_config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
-        self._prev_home = os.environ.get("HOME")
+        # USERPROFILE too: on Windows, expanduser("~") reads it, not HOME, and
+        # without it these tests read the developer's real ~/.claude.json.
+        self._prev_env = {var: os.environ.get(var)
+                          for var in ("CLAUDE_CONFIG_DIR", "HOME", "USERPROFILE")}
         os.environ["CLAUDE_CONFIG_DIR"] = self.fake_claude_dir
         os.environ["HOME"] = self.fake_home
+        os.environ["USERPROFILE"] = self.fake_home
 
     def tearDown(self):
-        for var, prev in (("CLAUDE_CONFIG_DIR", self._prev_config_dir), ("HOME", self._prev_home)):
+        for var, prev in self._prev_env.items():
             if prev is None:
                 os.environ.pop(var, None)
             else:
@@ -1077,8 +1075,18 @@ class TestPlanRateLimits(unittest.TestCase):
         """End-to-end: the exact installed string must work when a shell runs it."""
         import subprocess
         command = claude_config.statusline_command()
+        args, use_shell = command, True
+        if sys.platform == "win32":
+            # Claude Code on Windows runs commands through Git Bash, not
+            # cmd.exe (which doesn't understand the single quotes).
+            git_bash = os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"),
+                                    "Git", "bin", "bash.exe")
+            if not os.path.exists(git_bash):
+                self.skipTest("Git Bash not installed")
+            args, use_shell = [git_bash, "-c", command], False
         result = subprocess.run(
-            command, shell=True, input='{"rate_limits_available":false,"rate_limits":null}',
+            args, shell=use_shell,
+            input='{"rate_limits_available":false,"rate_limits":null}',
             capture_output=True, text=True, timeout=30,
             env={**os.environ, "TOKENS_COUNTER_CACHE": os.path.join(self.tmp, "cache.json")},
         )
@@ -1303,24 +1311,6 @@ class TestSessionSources(unittest.TestCase):
 
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
-
-    def _without_config_dir(self):
-        previous = os.environ.pop("CLAUDE_CONFIG_DIR", None)
-        self.addCleanup(os.environ.__setitem__, "CLAUDE_CONFIG_DIR", previous or "")
-
-    def test_wsl_adds_the_windows_home_sessions(self):
-        """Desktop and Windows-side Claude Code write there, not to the Linux ~/.claude."""
-        self._without_config_dir()
-        windows = os.path.join(self.tmp, "Users", "me", ".claude")
-        os.makedirs(os.path.join(windows, "projects"))
-        os.makedirs(os.path.join(self.tmp, "Users", "Public"))
-        roots = session_monitor.get_session_roots(wsl_users_root=os.path.join(self.tmp, "Users"))
-        self.assertEqual(roots[1:], [session_monitor.Path(windows)])
-
-    def test_an_explicit_config_dir_is_the_only_root(self):
-        os.makedirs(os.path.join(self.tmp, "Users", "me", ".claude", "projects"))
-        roots = session_monitor.get_session_roots(wsl_users_root=os.path.join(self.tmp, "Users"))
-        self.assertEqual(len(roots), 1)
 
     def test_a_changed_transcript_is_parsed_again(self):
         path = os.path.join(self.tmp, "s.jsonl")
@@ -1708,6 +1698,20 @@ class TestPortability(unittest.TestCase):
         self.assertEqual(os.path.abspath(script), os.path.abspath(expected))
 
 
+class TestStablePython(unittest.TestCase):
+    def test_never_picks_a_microsoft_store_stub(self):
+        """WindowsApps\\python3.exe opens the Store instead of running Python."""
+        import shutil as sh
+        real_which, real_prefix, real_base = sh.which, sys.prefix, sys.base_prefix
+        try:
+            sys.prefix, sys.base_prefix = "/venv", "/usr"
+            stub = r"C:\Users\me\AppData\Local\Microsoft\WindowsApps\python3.exe"
+            sh.which = lambda name: stub if name == "python3" else None
+            self.assertEqual(claude_config._stable_python(), sys.executable)
+        finally:
+            sh.which, sys.prefix, sys.base_prefix = real_which, real_prefix, real_base
+
+
 class TestStatuslineDiagnostics(unittest.TestCase):
     """
     A broken statusLine command produces no error anywhere - Claude Code just
@@ -1737,7 +1741,8 @@ class TestStatuslineDiagnostics(unittest.TestCase):
         self.assertTrue(any("shell arguments" in p for p in problems), problems)
 
     def test_detects_a_deleted_virtualenv(self):
-        self._set(f"'/gone/venv/bin/python3' '{self.here}/statusline.py'")
+        gone = os.path.join(self.tmp, "gone", "venv", "bin", "python3")
+        self._set(f"'{gone}' '{self.here}/statusline.py'")
         problems = claude_config.statusline_status_report()["problems"]
         self.assertTrue(any("Python it points at" in p for p in problems), problems)
 
@@ -1938,36 +1943,24 @@ class TestDesktopFallback(unittest.TestCase):
         self.assertFalse(claude_config.get_desktop_activity(self.tmp, now=self.now)["is_active"])
 
     def test_blob_attachment_dirs_are_skipped(self):
-        """Hundreds of near-empty blob dirs made a /mnt/c scan take ~4s."""
+        """Hundreds of near-empty blob dirs made a scan on a slow drive take ~4s."""
         self._touch("IndexedDB/https_claude.ai_0.indexeddb.blob/1/dc/dc95", 5)
         self._touch("IndexedDB/https_claude.ai_0.indexeddb.leveldb/000003.log", 7200)
         self.assertFalse(claude_config.get_desktop_activity(self.tmp, now=self.now)["is_active"])
 
-    def _wsl_desktop_dir(self):
-        if sys.platform in ("win32", "darwin"):
-            self.skipTest("the WSL lookup is Linux-only")
-        previous = os.environ.get("XDG_CONFIG_HOME")
-        os.environ["XDG_CONFIG_HOME"] = os.path.join(self.tmp, "linux-config")
-        try:
-            return claude_config.claude_desktop_dir(
-                wsl_users_root=os.path.join(self.tmp, "Users"))
-        finally:
-            if previous is None:
-                os.environ.pop("XDG_CONFIG_HOME", None)
-            else:
-                os.environ["XDG_CONFIG_HOME"] = previous
-
-    def test_wsl_finds_the_microsoft_store_profile(self):
-        """Under WSL, Desktop is the Windows app; the MSIX build is virtualized."""
-        msix = os.path.join(self.tmp, "Users", "me", "AppData", "Local", "Packages",
-                            "Claude_pzs8sxrjxfjjc", "LocalCache", "Roaming", "Claude")
+    def test_windows_finds_the_microsoft_store_profile(self):
+        """The Store (MSIX) build lives under LOCALAPPDATA, not APPDATA."""
+        local = os.path.join(self.tmp, "Local")
+        msix = os.path.join(local, "Packages", "Claude_pzs8sxrjxfjjc",
+                            "LocalCache", "Roaming", "Claude")
         os.makedirs(msix)
-        self.assertEqual(self._wsl_desktop_dir(), msix)
+        candidates = claude_config._windows_desktop_dirs(os.path.join(self.tmp, "Roaming"), local)
+        self.assertIn(msix, candidates)
 
-    def test_wsl_finds_the_classic_installer_profile(self):
-        roaming = os.path.join(self.tmp, "Users", "me", "AppData", "Roaming", "Claude")
-        os.makedirs(roaming)
-        self.assertEqual(self._wsl_desktop_dir(), roaming)
+    def test_windows_keeps_the_classic_installer_profile(self):
+        roaming = os.path.join(self.tmp, "Roaming")
+        candidates = claude_config._windows_desktop_dirs(roaming, os.path.join(self.tmp, "Local"))
+        self.assertEqual(candidates, [os.path.join(roaming, "Claude")])
 
     def _desktop_here(self):
         real = claude_config.claude_desktop_dir
