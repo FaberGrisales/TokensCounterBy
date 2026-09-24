@@ -1,8 +1,12 @@
 # 📊 Token Usage & Cost Visualizer
 
-Un visualizador de terminal (TUI) del uso y costo real de **Claude Code** en tu máquina: qué sesiones están activas, cuánto han gastado, qué tan llena está su ventana de contexto, el estado de tu suscripción, y qué servidores MCP/hooks tienes configurados.
+[![CI](https://github.com/FaberGrisales/TokensCounterBy/actions/workflows/ci.yml/badge.svg)](https://github.com/FaberGrisales/TokensCounterBy/actions/workflows/ci.yml)
 
-Esta app **no hace llamadas a ninguna API** y **no necesita ninguna clave**. Todo lo que muestra viene de leer los transcripts y archivos de configuración que **Claude Code ya guarda localmente** en tu máquina (`~/.claude/projects`, `~/.claude.json`, `.mcp.json`, `.claude/settings.json`). No hay modo simulado/estimado, ni mecánicas de juego, ni nada que se conecte a internet por su cuenta.
+Un visualizador de terminal (TUI) del uso y costo real de **Claude Code** y **Claude Desktop** en tu máquina: qué sesiones están activas, cuánto han gastado, qué tan llena está su ventana de contexto, el porcentaje real de tu plan (5h y 7 días), el estado de tu suscripción y qué servidores MCP/hooks tienes configurados. Incluye una **ventana flotante** siempre visible con todo eso más el uso de tu equipo (CPU, RAM, GPU, disco).
+
+Funciona en **Windows, macOS y Linux** — verificado en cada uno con CI (ver [Plataformas](#-plataformas)).
+
+Esta app **no hace llamadas a ninguna API** y **no necesita ninguna clave**. Todo lo que muestra viene de leer los archivos que **Claude Code y Claude Desktop ya guardan localmente** en tu máquina (`~/.claude/projects`, `~/.claude.json`, `.mcp.json`, `.claude/settings.json`, y el perfil local de Claude Desktop). No hay modo simulado/estimado, ni mecánicas de juego, ni nada que se conecte a internet por su cuenta.
 
 Las Opciones 1-4 y 6 son de solo lectura. Hay dos excepciones, y las dos piden confirmación explícita antes de tocar nada: la **Opción 5** (Cleanup), que puede **borrar** transcripts de sesiones viejas, y la **Opción 7** (Real Plan Limits), que **escribe** una clave en tu `~/.claude/settings.json` (con copia de seguridad previa) para capturar tus límites reales.
 
@@ -12,12 +16,12 @@ Las Opciones 1-4 y 6 son de solo lectura. Hay dos excepciones, y las dos piden c
 
 | | Requisito | Notas |
 |---|---|---|
-| **Sistema operativo** | Linux, macOS o Windows | Probado en Windows 11 y en Ubuntu con GNOME 46 (Wayland). WSL no está soportado |
+| **Sistema operativo** | Windows, macOS o Linux | Corriendo directamente en el sistema (en Windows, con Python de Windows). WSL no está soportado |
 | **Python** | 3.8 o superior | Se valida al arrancar y aborta con un mensaje claro si es menor |
 | **`rich`** | Requerido | La única dependencia obligatoria. La app la instala por ti si falta |
 | **`tkinter`** | Opcional | **Solo** para la Opción 6 (ventana flotante). Todo lo demás funciona sin él |
-| **`psutil`** | Opcional | **Solo** para la línea de CPU/RAM/disco de la ventana flotante. Si falta, la Opción 6 te ofrece instalarlo |
-| **Claude Code** | Usado alguna vez en esta máquina | Sin transcripts en `~/.claude/projects` no hay nada que mostrar |
+| **`psutil`** | Opcional | **Solo** para CPU, RAM y disco en la ventana flotante (la GPU no lo necesita). Si falta, la Opción 6 te ofrece instalarlo |
+| **Claude Code y/o Claude Desktop** | Usado alguna vez en esta máquina | Con Claude Code ves tokens, costo y contexto por sesión. Con Claude Desktop ves el % real de tu plan y la actividad de tus chats |
 | **Red / API keys** | **Ninguna** | La app no hace ni una sola llamada de red y no usa ninguna clave |
 
 ### Sobre `tkinter` por sistema operativo
@@ -44,7 +48,19 @@ git clone git@github.com:FaberGrisales/TokensCounterBy.git
 cd TokensCounterBy
 
 python3 -m venv venv
-source venv/bin/activate        # En Windows: venv\Scripts\activate
+source venv/bin/activate
+
+pip install -r requirements.txt
+```
+
+En **Windows** (PowerShell o CMD):
+
+```powershell
+git clone https://github.com/FaberGrisales/TokensCounterBy.git
+cd TokensCounterBy
+
+python -m venv .venv
+.venv\Scripts\activate
 
 pip install -r requirements.txt
 ```
@@ -52,7 +68,7 @@ pip install -r requirements.txt
 **Ese último paso es opcional.** Al arrancar, la app verifica sus dependencias sola:
 
 - Si falta **`rich`**, te muestra el comando exacto y te ofrece instalarlo antes de continuar.
-- Si falta **`tkinter`**, te lo avisa en el menú y te ofrece instalarlo cuando elijas la Opción 6.
+- Si falta **`tkinter`** o **`psutil`**, te lo avisa en el menú y te ofrece instalarlo cuando elijas la Opción 6.
 
 Nunca instala nada sin que le digas que sí, y siempre te enseña el comando antes de correrlo. En Linux, instalar `tkinter` usa el gestor de paquetes del sistema y te va a pedir tu contraseña — eso es normal y es la razón por la que se pide confirmación en vez de hacerlo en silencio.
 
@@ -63,9 +79,9 @@ Nunca instala nada sin que le digas que sí, y siempre te enseña el comando ant
 Ejecuta el script de lanzamiento desde la raíz del proyecto:
 
 ```bash
-python3 start.py
+python3 start.py        # En Windows: python start.py
 ```
-*(También puedes darle permisos de ejecución con `chmod +x start.py` y correrlo como `./start.py`).*
+*(En Linux/macOS también puedes darle permisos de ejecución con `chmod +x start.py` y correrlo como `./start.py`).*
 
 Una vez iniciado, verás el menú principal con las siguientes opciones:
 
@@ -74,13 +90,15 @@ Una vez iniciado, verás el menú principal con las siguientes opciones:
 3. **Claude Code Config (MCP & Hooks)**: Qué servidores MCP y qué hooks tienes configurados para este proyecto, inspirado en los comandos `/mcp` y `/hooks` (ver sección de abajo).
 4. **Session Breakdown**: Elegís una sesión y ves, subagente por subagente y **llamada MCP por llamada MCP**, exactamente cuántos tokens/cuánto costó cada invocación individual (ver sección de abajo).
 5. **Cleanup Inactive Sessions**: Borra permanentemente sesiones locales sin actividad hace 7+ días, con selección manual y confirmación explícita (ver sección de abajo).
-6. **Floating Monitor**: Abre una ventana pequeña que se queda **encima de las demás ventanas**, con el consumo en vivo de Claude Code y la actividad de Claude Desktop, para verlo mientras trabajas en otra aplicación (ver sección de abajo).
+6. **Floating Monitor**: Abre una ventana pequeña que se queda **encima de las demás ventanas** con el uso de tu equipo (CPU, RAM, GPU, disco), el % real de tu plan, tus sesiones de Claude Code y la actividad de Claude Desktop, para verlo mientras trabajas en otra aplicación (ver sección de abajo).
 7. **Enable Real Plan Limits**: Activa la captura de tus porcentajes reales de límite de plan (5h y 7 días) desde Claude Code (ver sección de abajo).
 8. **Exit**: Cierra la aplicación.
 
 ### 🧭 Primeros pasos (recomendado)
 
-La primera vez que uses la app, en este orden:
+**Si usas Claude Desktop**, no tienes que configurar nada: Desktop guarda el porcentaje real de tu plan y la app lo lee directamente. Abre la Opción 6 y listo.
+
+**Si solo usas Claude Code**, la primera vez, en este orden:
 
 1. **Opción 7 — Enable Real Plan Limits.** Instala un pequeño script en tu status line de Claude Code que captura tus porcentajes reales de límite (5h y 7 días). Te muestra exactamente qué va a escribir y te pide confirmación.
 2. **Reinicia Claude Code.** Lee su configuración solo al arrancar, así que sin reiniciar el script no se ejecuta.
@@ -142,7 +160,7 @@ Contenido:
   - **Importante sobre el "%"**: es un **% de cuánto tiempo de la ventana está ocupado por actividad real tuya**, **no** el % de tu cuota de plan gastada — este dato no es lo mismo que "cuántos tokens/mensajes te quedan", solo cuánto tiempo real llevas usando Claude Code dentro de esa ventana. El título de la tabla y una nota de una línea debajo lo dejan explícito, precisamente porque comparar este % contra el "% used" real que muestra Claude Code (calculado en su servidor contra tu cuota de plan) es un error fácil de cometer si no se aclara.
   - El % se muestra con 2 decimales y el tiempo transcurrido incluye segundos (ej. `2h 14m 08s`) para que veas el avance en cada refresco de 5 segundos, en vez de que parezca congelado por minutos.
   - **Window Ends**: cuándo esa petición más antigua sale de la ventana ("Window Started" + 5 horas, o + 7 días), con una cuenta regresiva debajo (`in 1h14m`). Ojo: **no es un reinicio de cuota**. Cuando llega esa hora, la ventana simplemente pasa a medirse desde la siguiente petición más antigua.
-- **Plan Limit Used (real)**: el porcentaje **real** de tu límite de plan de 5 horas y de 7 días, con la hora exacta en que Claude lo reinicia (`resets Sep 15 00:50`). Estos sí son los números de Anthropic, los mismos que ves en `/usage`. **Requiere haber activado la Opción 7** — sin ella la columna no aparece. Debajo de la tabla se indica hace cuánto se capturó la lectura, en amarillo si pasaron más de 5 minutos.
+- **Plan Limit Used (real)**: el porcentaje **real** de tu límite de plan de 5 horas y de 7 días, y cuándo se reinicia (`resets Sep 15 00:50`). Estos sí son los números de Anthropic, los mismos que ves en `/usage`. Salen de **Claude Desktop** (que los guarda solo, sin configurar nada; la hora de reinicio es estimada y lleva `~`) o de la **Opción 7** (con hora exacta); si hay las dos, gana la lectura más reciente. Sin ninguna de las dos la columna no aparece. Debajo de la tabla se indica de dónde y hace cuánto se capturó la lectura.
 - **Total Estimated Cost** y **Total Requests**: sumados sobre todas las sesiones detectadas.
 - **Usage by Model**: la misma idea que la lista de `/usage` (`modelo: input, output, cache read, cache write ($costo)`), pero agregada globalmente. Ordenado por costo, muestra hasta 8 modelos con una fila "+N more" si hay más (para que la vista en vivo no crezca más que una terminal típica).
 - **By Project**: desglose adicional por carpeta de proyecto (esto no existe en `/usage`, pero como esta app ve todas las sesiones a la vez, tiene sentido mostrarlo). También limitado a 8 filas con "+N more" si aplica.
@@ -268,14 +286,12 @@ Si la lectura es vieja (más de 5 minutos para Claude Code, más de 20 para Desk
 
 **Título del chat de Desktop (opcional).** La primera vez que abres la Opción 6, la app pregunta si quieres ver el título del chat de Desktop en el que estás. Viene **desactivado** porque los títulos se generan a partir de tus mensajes, y en todo lo demás la app nunca lee contenido de tus conversaciones. Se lee de la caché local de Desktop, sin mandar nada a ningún lado. Tu respuesta queda guardada en `~/.config/tokenscounterby/settings.json` (Windows: `%APPDATA%\TokensCounterBy\settings.json`; macOS: `~/Library/Application Support/TokensCounterBy/settings.json`); bórralo para que vuelva a preguntar.
 
-Funciona en Windows, macOS y Linux, corriendo la app directamente en el sistema operativo (en Windows, con Python de Windows; WSL no está soportado).
-
 Controles:
 
 - **Click** sobre la ventana: alterna entre "siempre encima" y ventana normal.
 - **Esc** o la X: la cierra y vuelve al menú.
 
-Funciona en Windows, macOS y Linux con el mismo código (`-topmost` de tkinter). En Linux con Wayland la ventana corre bajo XWayland, que es lo que permite que el compositor respete el "siempre encima" — probado en GNOME 46 / Ubuntu. Si tu compositor lo ignorara, la ventana sigue funcionando, solo que no se quedaría encima.
+Funciona en Windows, macOS y Linux con el mismo código (`-topmost` de tkinter), corriendo la app directamente en el sistema (WSL no está soportado). En Linux con Wayland la ventana corre bajo XWayland, que es lo que permite que el compositor respete el "siempre encima" — probado en GNOME 46 / Ubuntu. Si tu compositor lo ignorara, la ventana sigue funcionando, solo que no se quedaría encima.
 
 Mientras la ventana está abierta, la terminal queda esperando: se cierra la ventana y vuelves al menú. Es a propósito, para que salir de la app no deje ventanas huérfanas por ahí.
 
@@ -327,10 +343,26 @@ Para desinstalarlo, borra la clave `statusLine` de `~/.claude/settings.json` (o 
 
 ---
 
+## ✅ Plataformas
+
+Cada cambio se prueba automáticamente en máquinas reales de **Linux, Windows y macOS** con GitHub Actions ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)): los tests unitarios más una prueba de punta a punta que arranca el menú, lee CPU/RAM/GPU/disco, ejecuta el script del status line y abre y cierra la ventana flotante.
+
+| Sistema | Tests + app | Ventana flotante | CPU / RAM / disco | GPU |
+|---|---|---|---|---|
+| **Windows** | ✅ CI + equipo real (Windows 11) | ✅ | ✅ | ✅ Cualquier marca (contadores del sistema, como el Administrador de tareas) |
+| **macOS** | ✅ CI (Apple Silicon) | ✅ | ✅ | `ioreg`: probado solo con tests; los runners de CI no reportan GPU |
+| **Linux** | ✅ CI (Ubuntu 22.04 y 24.04) | ✅ (probado con pantalla virtual) | ✅ | NVIDIA (`nvidia-smi`) y AMD: probado solo con tests. Intel integrada: no disponible |
+| **Python** | 3.8 a 3.13 | | | |
+
+Cuando algo no se puede leer en tu equipo (por ejemplo, una GPU sin herramientas de lectura), simplemente no se muestra — la app nunca inventa un número.
+
 ## 🧪 Tests
 
 ```bash
-python3 -m unittest tests.test_calculator
+python3 -m unittest tests.test_calculator    # tests unitarios
+python3 scripts/smoke_test.py                # prueba de punta a punta en tu sistema
 ```
+
+La prueba de punta a punta usa una carpeta de configuración vacía (no toca tus datos reales) y abre la ventana flotante unos segundos; con `--no-window` se la salta.
 
 Las opciones 1-4 y 6 son de solo lectura sobre los archivos locales de Claude Code. La Opción 5 es la única que borra algo, y la Opción 7 la única que modifica la configuración de Claude Code (solo la clave `statusLine`, con copia de seguridad).
