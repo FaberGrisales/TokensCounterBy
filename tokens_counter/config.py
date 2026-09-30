@@ -34,9 +34,12 @@ DEFAULT_BUDGET = {
 # string has shown up in transcripts; it's the same model as claude-haiku-4-5
 # and both are listed so either spelling prices correctly.
 #
-# The claude-3-* entries at the bottom are legacy and kept only so old
-# transcripts (and the cost-math tests) still price; they are not current
-# model IDs.
+# The Opus 4/4.1/4.5, Sonnet 4/4.5 and claude-3-* entries at the bottom are
+# older models, kept so old transcripts (and the cost-math tests) still
+# price. They matter beyond that: pricing.py estimates an unknown model from
+# its nearest configured sibling, and Opus dropped from $15 to $5 at 4.5 -
+# without Opus 4.1 listed here, a claude-opus-4-1 transcript would be
+# "estimated" at a third of its real cost.
 DEFAULT_CONFIG = {
     "claude-fable-5-1": {
         "name": "Claude Fable 5.1",
@@ -158,6 +161,76 @@ DEFAULT_CONFIG = {
         "supports_caching": True,
         "context_window": 200000
     },
+    "claude-opus-4-5": {
+        "name": "Claude Opus 4.5",
+        "provider": "Anthropic Claude",
+        "input_cost_per_1m": 5.00,
+        "output_cost_per_1m": 25.00,
+        "cache_write_cost_per_1m": 6.25,
+        "cache_read_cost_per_1m": 0.50,
+        "supports_caching": True,
+        "context_window": 200000
+    },
+    "claude-opus-4-1": {
+        "name": "Claude Opus 4.1",
+        "provider": "Anthropic Claude",
+        "input_cost_per_1m": 15.00,
+        "output_cost_per_1m": 75.00,
+        "cache_write_cost_per_1m": 18.75,
+        "cache_read_cost_per_1m": 1.50,
+        "supports_caching": True,
+        "context_window": 200000
+    },
+    "claude-opus-4": {
+        "name": "Claude Opus 4",
+        "provider": "Anthropic Claude",
+        "input_cost_per_1m": 15.00,
+        "output_cost_per_1m": 75.00,
+        "cache_write_cost_per_1m": 18.75,
+        "cache_read_cost_per_1m": 1.50,
+        "supports_caching": True,
+        "context_window": 200000
+    },
+    "claude-sonnet-4-5": {
+        "name": "Claude Sonnet 4.5",
+        "provider": "Anthropic Claude",
+        "input_cost_per_1m": 3.00,
+        "output_cost_per_1m": 15.00,
+        "cache_write_cost_per_1m": 3.75,
+        "cache_read_cost_per_1m": 0.30,
+        "supports_caching": True,
+        "context_window": 200000
+    },
+    "claude-sonnet-4": {
+        "name": "Claude Sonnet 4",
+        "provider": "Anthropic Claude",
+        "input_cost_per_1m": 3.00,
+        "output_cost_per_1m": 15.00,
+        "cache_write_cost_per_1m": 3.75,
+        "cache_read_cost_per_1m": 0.30,
+        "supports_caching": True,
+        "context_window": 200000
+    },
+    "claude-3-7-sonnet": {
+        "name": "Claude 3.7 Sonnet (legacy)",
+        "provider": "Anthropic Claude",
+        "input_cost_per_1m": 3.00,
+        "output_cost_per_1m": 15.00,
+        "cache_write_cost_per_1m": 3.75,
+        "cache_read_cost_per_1m": 0.30,
+        "supports_caching": True,
+        "context_window": 200000
+    },
+    "claude-3-haiku": {
+        "name": "Claude 3 Haiku (legacy)",
+        "provider": "Anthropic Claude",
+        "input_cost_per_1m": 0.25,
+        "output_cost_per_1m": 1.25,
+        "cache_write_cost_per_1m": 0.30,
+        "cache_read_cost_per_1m": 0.03,
+        "supports_caching": True,
+        "context_window": 200000
+    },
     "claude-3-5-sonnet": {
         "name": "Claude 3.5 Sonnet (legacy)",
         "provider": "Anthropic Claude",
@@ -220,40 +293,29 @@ def save_config(config_data):
     except Exception:
         return False
 
-def calculate_call_cost(model_key, input_tokens, output_tokens, cached_read_tokens=0, cached_write_tokens=0):
+def calculate_call_cost(model_key, input_tokens, output_tokens, cached_read_tokens=0, cached_write_tokens=0,
+                        cached_write_1h_tokens=0, web_search_requests=0):
     """
-    Calculate the cost of a call in USD based on input, output, and cache usage.
-    Rates in config are per 1 Million tokens.
+    USD cost of one call, in the API's ADDITIVE token convention: `input_tokens`
+    is the uncached input only, and cache reads/writes are counted on top of
+    it - exactly how every transcript line reports usage. (An earlier version
+    subtracted the cache counts from `input_tokens`, which dropped the real
+    input cost to zero for any cached turn.)
+
+    `model_key` goes through pricing.resolve_pricing(), so dated/Bedrock/Vertex
+    spellings and brand-new models of a known family are priced too. Returns
+    0.0 for a model that can't be priced; callers that need an honest
+    "unpriced" use pricing.PriceBook, which returns None instead.
     """
-    config = load_config()
-    if model_key not in config:
+    from tokens_counter.pricing import resolve_pricing, token_cost
+
+    pricing = resolve_pricing(model_key, load_config())
+    if pricing is None:
         return 0.0
-
-    m_cfg = config[model_key]
-
-    # Base costs per token
-    in_rate = m_cfg.get("input_cost_per_1m", 0.0) / 1000000.0
-    out_rate = m_cfg.get("output_cost_per_1m", 0.0) / 1000000.0
-    
-    # Calculate costs
-    # Input tokens that are NOT read from cache are charged the base input rate
-    # For Claude: some input tokens are used to write cache (charged cache_write_cost_per_1m)
-    # For standard tokens (neither cached_read nor cached_write), they are standard input tokens.
-    standard_input_tokens = max(0, input_tokens - cached_read_tokens - cached_write_tokens)
-    
-    cost = 0.0
-    cost += standard_input_tokens * in_rate
-    cost += output_tokens * out_rate
-    
-    # Caching costs
-    if m_cfg.get("supports_caching", False):
-        cache_read_rate = m_cfg.get("cache_read_cost_per_1m", 0.0) / 1000000.0
-        cache_write_rate = m_cfg.get("cache_write_cost_per_1m", 0.0) / 1000000.0
-        
-        cost += cached_read_tokens * cache_read_rate
-        cost += cached_write_tokens * cache_write_rate
-        
-    return cost
+    return token_cost(
+        pricing, input_tokens, output_tokens, cached_read_tokens, cached_write_tokens,
+        cached_write_1h_tokens, web_search_requests,
+    )
 
 
 def load_budget():

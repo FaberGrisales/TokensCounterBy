@@ -1,5 +1,6 @@
 import os
 import json
+import math
 import shutil
 import time
 from collections import defaultdict
@@ -8,7 +9,8 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from tokens_counter.config import calculate_call_cost, load_budget
+from tokens_counter.config import load_budget
+from tokens_counter.pricing import PriceBook, learn_rates
 
 # Claude Code stores one JSONL transcript per session under
 # <config_dir>/projects/<project>/<session-id>.jsonl, plus (when the session
@@ -113,11 +115,25 @@ def _scan(groups):
         paths = [p for g in groups for p in [g["main"], *g["subagents"]]]
         if len(paths) > 1:
             with ThreadPoolExecutor(max_workers=8) as pool:
-                list(pool.map(_iter_usage_lines, paths))
+                list(pool.map(_cached_file, paths))
         yield
     finally:
         if owner:
             _SCAN_STATS = None
+
+
+def _cached_file(path):
+    """(usage lines, cost-state records) for one transcript, memoized on (mtime, size)."""
+    try:
+        st = _stat(path)
+    except OSError:
+        return [], []
+    key = (st.st_mtime_ns, st.st_size)
+    cached = _USAGE_CACHE.get(str(path))
+    if cached is None or cached[0] != key:
+        cached = (key, *_parse_file(path))
+        _USAGE_CACHE[str(path)] = cached
+    return cached[1], cached[2]
 
 
 def _iter_usage_lines(path):
@@ -127,19 +143,41 @@ def _iter_usage_lines(path):
     "mcp__filesystem__read_file" or "Bash") - never the tool's arguments or
     result, and never any text/reasoning content.
     """
-    try:
-        st = _stat(path)
-    except OSError:
-        return iter(())
-    key = (st.st_mtime_ns, st.st_size)
-    cached = _USAGE_CACHE.get(str(path))
-    if cached is None or cached[0] != key:
-        cached = (key, list(_parse_usage_lines(path)))
-        _USAGE_CACHE[str(path)] = cached
-    return iter(cached[1])
+    return iter(_cached_file(path)[0])
 
 
-def _parse_usage_lines(path):
+def _iter_cost_states(path):
+    """Claude Code's own `cost-state` records in a transcript (numbers only)."""
+    return iter(_cached_file(path)[1])
+
+
+def _usage_number(usage, key):
+    """A token count: a finite, non-negative number, else 0."""
+    value = usage.get(key, 0)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0
+    return value if math.isfinite(value) and value >= 0 else 0
+
+
+def _parse_file(path):
+    """
+    One pass over a transcript: deduplicated usage lines, and cost-state records.
+
+    Claude Code writes ONE assistant message as SEVERAL lines - one per
+    content block (thinking, text, each tool_use) - and every one of them
+    repeats the message's `usage`. Summing lines counted real usage ~2.4x on
+    the developer's machine (4,734 lines for 2,001 messages). Lines sharing
+    a `(message.id, requestId)` are therefore merged into one: token counts
+    take the largest value seen (a later line of a streamed message carries
+    the final output count, never a smaller one), and tool names are
+    unioned, since each line holds different blocks. Lines without an id
+    can't be matched and are kept as-is.
+
+    `cost-state` records keep only numeric fields (see _cost_state_numbers).
+    """
+    lines = []
+    by_key = {}
+    cost_states = []
     try:
         with open(path, "r", encoding="utf-8") as f:
             for line in f:
@@ -150,6 +188,14 @@ def _parse_usage_lines(path):
                     entry = json.loads(line)
                 except ValueError:
                     continue
+                if not isinstance(entry, dict):
+                    continue
+
+                if entry.get("type") == "cost-state":
+                    record = _cost_state_numbers(entry)
+                    if record:
+                        cost_states.append(record)
+                    continue
 
                 message = entry.get("message")
                 if not isinstance(message, dict):
@@ -159,6 +205,8 @@ def _parse_usage_lines(path):
                     continue
 
                 model = message.get("model")
+                if not isinstance(model, str):
+                    model = None
                 if model == "<synthetic>":
                     # Internal zero-usage placeholder (e.g. a cancelled/tool-only
                     # turn), not a real billable request - skip it entirely so it
@@ -174,18 +222,150 @@ def _parse_usage_lines(path):
                             if isinstance(name, str):
                                 tool_names.append(name)
 
-                yield {
-                    "timestamp": entry.get("timestamp"),
+                cache_creation = usage.get("cache_creation")
+                cache_creation = cache_creation if isinstance(cache_creation, dict) else {}
+                server_tools = usage.get("server_tool_use")
+                server_tools = server_tools if isinstance(server_tools, dict) else {}
+
+                # Only well-formed ids form a key - anything else can't be
+                # matched reliably, and a list or dict isn't even hashable.
+                message_id = message.get("id")
+                request_id = entry.get("requestId")
+                message_key = None
+                if isinstance(message_id, str) and message_id and isinstance(request_id, (str, type(None))):
+                    message_key = (message_id, request_id)
+
+                timestamp = entry.get("timestamp")
+                parsed = {
+                    "timestamp": timestamp if isinstance(timestamp, str) else None,
                     "cwd": entry.get("cwd"),
                     "model": model or "unknown",
-                    "input_tokens": usage.get("input_tokens", 0) or 0,
-                    "output_tokens": usage.get("output_tokens", 0) or 0,
-                    "cache_read_tokens": usage.get("cache_read_input_tokens", 0) or 0,
-                    "cache_write_tokens": usage.get("cache_creation_input_tokens", 0) or 0,
+                    "input_tokens": _usage_number(usage, "input_tokens"),
+                    "output_tokens": _usage_number(usage, "output_tokens"),
+                    "cache_read_tokens": _usage_number(usage, "cache_read_input_tokens"),
+                    "cache_write_tokens": _usage_number(usage, "cache_creation_input_tokens"),
+                    # The part of cache_write written with a 1-hour TTL, billed
+                    # at 2x input rather than the 5-minute 1.25x.
+                    "cache_write_1h_tokens": _usage_number(cache_creation, "ephemeral_1h_input_tokens"),
+                    "web_search_requests": _usage_number(server_tools, "web_search_requests"),
                     "tool_names": tool_names,
+                    "message_key": message_key,
                 }
+
+                previous = by_key.get(message_key) if message_key else None
+                if previous is None:
+                    if message_key:
+                        by_key[message_key] = parsed
+                    lines.append(parsed)
+                    continue
+                for field in ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens",
+                              "cache_write_1h_tokens", "web_search_requests"):
+                    previous[field] = max(previous[field], parsed[field])
+                previous["tool_names"] = previous["tool_names"] + [
+                    n for n in tool_names if n not in previous["tool_names"]]
+                if not previous["cwd"]:
+                    previous["cwd"] = parsed["cwd"]
     except (OSError, UnicodeDecodeError):
-        return
+        pass
+    return lines, cost_states
+
+
+_COST_STATE_FIELDS = ("inputTokens", "outputTokens", "cacheReadInputTokens",
+                      "cacheCreationInputTokens", "webSearchRequests", "costUSD")
+
+
+def _cost_state_numbers(entry):
+    """
+    A `cost-state` record reduced to its per-model numbers. The record also
+    carries durations and line counts; only what pricing needs is kept.
+    """
+    model_usage = entry.get("modelUsage")
+    if not isinstance(model_usage, dict):
+        return None
+    kept = {}
+    for model, usage in model_usage.items():
+        if isinstance(model, str) and isinstance(usage, dict):
+            kept[model] = {k: usage.get(k) for k in _COST_STATE_FIELDS}
+    if not kept:
+        return None
+    return {"modelUsage": kept, "hasUnknownModelCost": bool(entry.get("hasUnknownModelCost"))}
+
+
+def _group_paths(group):
+    return [group["main"], *group["subagents"]]
+
+
+def build_price_book(config_data, groups=None):
+    """
+    A PriceBook over `config_data` plus rates learned from the cost-state
+    records in `groups`' transcripts (already parsed if inside a _scan()).
+    """
+    records = [r for g in (groups or []) for p in _group_paths(g) for r in _iter_cost_states(p)]
+    return PriceBook(config_data, learn_rates(records))
+
+
+def _ownership_order(group):
+    """
+    Sort key deciding which session owns a message found in several files:
+    the one whose transcript starts earliest. A resumed session copies the
+    earlier messages WITH their original timestamps, so the two files often
+    start at the same instant; the least recently modified file (the
+    original, which stopped growing when it was resumed) breaks the tie,
+    then the path, so the owner never depends on directory listing order.
+    """
+    stamps = [line["timestamp"] for p in _group_paths(group) for line in _iter_usage_lines(p) if line["timestamp"]]
+    return (min(stamps) if stamps else "~", _safe_mtime(group["main"]), str(group["main"]))
+
+
+def _dedupe_across(groups):
+    """
+    {path: usage lines} with each message kept in only ONE file.
+
+    A resumed or forked session starts its transcript with a copy of the
+    earlier conversation, message ids included - 296 messages on the
+    developer's machine appeared in two sessions' files. They were billed
+    once, so they're counted once: the session whose transcript starts
+    earliest keeps them, and later copies are dropped.
+    """
+    seen = set()
+    owned = {}
+    for group in sorted(groups, key=_ownership_order):
+        for path in _group_paths(group):
+            kept = []
+            for line in _iter_usage_lines(path):
+                key = line.get("message_key")
+                if key is not None:
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                kept.append(line)
+            owned[str(path)] = kept
+    return owned
+
+
+def _lines_for(path, lines_by_path):
+    if lines_by_path is not None and str(path) in lines_by_path:
+        return iter(lines_by_path[str(path)])
+    return _iter_usage_lines(path)
+
+
+def _new_bucket():
+    return {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0, "cache_write_1h": 0, "web_search": 0}
+
+
+def _add_to_bucket(bucket, usage_line):
+    bucket["input"] += usage_line["input_tokens"]
+    bucket["output"] += usage_line["output_tokens"]
+    bucket["cache_read"] += usage_line["cache_read_tokens"]
+    bucket["cache_write"] += usage_line["cache_write_tokens"]
+    bucket["cache_write_1h"] += usage_line.get("cache_write_1h_tokens", 0)
+    bucket["web_search"] += usage_line.get("web_search_requests", 0)
+
+
+def _line_bucket(usage_line):
+    bucket = _new_bucket()
+    _add_to_bucket(bucket, usage_line)
+    return bucket
 
 
 def _parse_mcp_tool_name(name):
@@ -204,7 +384,7 @@ def _parse_mcp_tool_name(name):
     return server, tool
 
 
-def build_mcp_call_log(group, config_data):
+def build_mcp_call_log(group, config_data, book=None, lines_by_path=None):
     """
     Per-turn log of every local MCP tool_use call within one session (main +
     subagents), most recent first - the actual "what did this specific
@@ -220,23 +400,19 @@ def build_mcp_call_log(group, config_data):
     whole turn, not an isolated cost for just that one tool call. `tools`
     (the exact tool_use names in that turn) IS an exact count of what ran.
     """
+    book = book or build_price_book(config_data, [group])
     rows = []
     for path in [group["main"]] + group["subagents"]:
         is_subagent = path != group["main"]
         source = _read_subagent_meta(path).get("agentType", "Subagent") if is_subagent else "Main"
 
-        for usage_line in _iter_usage_lines(path):
+        for usage_line in _lines_for(path, lines_by_path):
             mcp_tools = [n for n in (usage_line.get("tool_names") or []) if _parse_mcp_tool_name(n)]
             if not mcp_tools:
                 continue
 
             model = usage_line["model"]
-            cost = None
-            if model in config_data:
-                cost = calculate_call_cost(
-                    model, usage_line["input_tokens"], usage_line["output_tokens"],
-                    cached_read_tokens=usage_line["cache_read_tokens"], cached_write_tokens=usage_line["cache_write_tokens"]
-                )
+            cost = book.cost(model, _line_bucket(usage_line))
 
             rows.append({
                 "timestamp": _parse_timestamp(usage_line["timestamp"]),
@@ -248,6 +424,7 @@ def build_mcp_call_log(group, config_data):
                 "cache_read_tokens": usage_line["cache_read_tokens"],
                 "cache_write_tokens": usage_line["cache_write_tokens"],
                 "cost": cost,
+                "cost_estimated": book.is_estimated(model),
             })
 
     rows.sort(key=lambda r: r["timestamp"] or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
@@ -276,13 +453,20 @@ def _parse_timestamp(ts):
         return None
 
 
-def build_session_summary(group, config_data, now=None):
-    """Aggregate one session (main transcript + its subagents) into a display-ready summary dict."""
+def build_session_summary(group, config_data, now=None, book=None, lines_by_path=None):
+    """
+    Aggregate one session (main transcript + its subagents) into a display-ready summary dict.
+
+    `book` prices the models (built from `config_data` alone when omitted);
+    `lines_by_path` is _dedupe_across()'s output, so a resumed session
+    doesn't re-count the conversation it copied from an earlier one.
+    """
     main_path = group["main"]
     subagent_paths = group["subagents"]
     now = time.time() if now is None else now
 
-    by_model = defaultdict(lambda: {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0})
+    book = book or build_price_book(config_data, [group])
+    by_model = defaultdict(_new_bucket)
     main_requests = 0
     subagent_requests = 0
     cwd = None
@@ -290,12 +474,9 @@ def build_session_summary(group, config_data, now=None):
     last_request = None
 
     for is_subagent, path in [(False, main_path)] + [(True, p) for p in subagent_paths]:
-        for usage_line in _iter_usage_lines(path):
+        for usage_line in _lines_for(path, lines_by_path):
             model = usage_line["model"]
-            by_model[model]["input"] += usage_line["input_tokens"]
-            by_model[model]["output"] += usage_line["output_tokens"]
-            by_model[model]["cache_read"] += usage_line["cache_read_tokens"]
-            by_model[model]["cache_write"] += usage_line["cache_write_tokens"]
+            _add_to_bucket(by_model[model], usage_line)
 
             if is_subagent:
                 subagent_requests += 1
@@ -306,7 +487,9 @@ def build_session_summary(group, config_data, now=None):
                 cwd = usage_line["cwd"]
             if usage_line["timestamp"] and (last_timestamp is None or usage_line["timestamp"] > last_timestamp):
                 last_timestamp = usage_line["timestamp"]
-                last_request = {"model": model, **{k: usage_line[k] for k in ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens")}}
+                last_request = {"model": model, **{k: usage_line.get(k, 0) for k in (
+                    "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens",
+                    "cache_write_1h_tokens", "web_search_requests")}}
 
     total_requests = main_requests + subagent_requests
     if total_requests == 0:
@@ -319,21 +502,18 @@ def build_session_summary(group, config_data, now=None):
 
     priced_cost = 0.0
     has_priced_model = False
+    pricing = {}
     for model, tokens in by_model.items():
-        if model not in config_data:
+        cost = book.cost(model, tokens)
+        pricing[model] = book.source(model)
+        if cost is None:
             continue
         has_priced_model = True
-        priced_cost += calculate_call_cost(
-            model, tokens["input"], tokens["output"],
-            cached_read_tokens=tokens["cache_read"], cached_write_tokens=tokens["cache_write"]
-        )
+        priced_cost += cost
 
     last_request_cost = None
-    if last_request and last_request["model"] in config_data:
-        last_request_cost = calculate_call_cost(
-            last_request["model"], last_request["input_tokens"], last_request["output_tokens"],
-            cached_read_tokens=last_request["cache_read_tokens"], cached_write_tokens=last_request["cache_write_tokens"]
-        )
+    if last_request:
+        last_request_cost = book.cost(last_request["model"], _line_bucket(last_request))
 
     # Context window usage (mirrors what /context shows): the model bills
     # input_tokens + cache_read_tokens + cache_write_tokens as the full prompt
@@ -344,7 +524,7 @@ def build_session_summary(group, config_data, now=None):
     context_percent = None
     if last_request:
         context_used_tokens = last_request["input_tokens"] + last_request["cache_read_tokens"] + last_request["cache_write_tokens"]
-        model_cfg = config_data.get(last_request["model"])
+        model_cfg = book.get(last_request["model"])
         if model_cfg and model_cfg.get("context_window"):
             context_window = model_cfg["context_window"]
             context_percent = min(100.0, (context_used_tokens / context_window) * 100)
@@ -365,6 +545,11 @@ def build_session_summary(group, config_data, now=None):
         "cache_read_tokens": total_cache_read,
         "cache_write_tokens": total_cache_write,
         "cost": priced_cost if has_priced_model else None,
+        # model -> "configured" / "alias" / "learned" / "estimated", or None
+        # when unpriced. An estimated rate is borrowed from a sibling model,
+        # so a cost that includes one is shown with a "~".
+        "pricing": pricing,
+        "cost_estimated": any(src == "estimated" for src in pricing.values()),
         "last_request": last_request,
         "last_request_cost": last_request_cost,
         "context_used_tokens": context_used_tokens,
@@ -395,25 +580,22 @@ def _read_subagent_meta(subagent_path):
     return data if isinstance(data, dict) else {}
 
 
-def build_subagent_breakdown(group, config_data):
+def build_subagent_breakdown(group, config_data, book=None, lines_by_path=None):
     """
     Per-subagent token/cost breakdown for one session group, so you can see
     exactly how much a single subagent invocation (a "Task" tool call, e.g.
     one Explore/general-purpose agent run) consumed, rather than only the
     session-wide total. Returns a list of dicts, most recently active first.
     """
+    book = book or build_price_book(config_data, [group])
     results = []
     for path in group["subagents"]:
-        by_model = defaultdict(lambda: {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0})
+        by_model = defaultdict(_new_bucket)
         requests = 0
         last_timestamp = None
 
-        for usage_line in _iter_usage_lines(path):
-            model = usage_line["model"]
-            by_model[model]["input"] += usage_line["input_tokens"]
-            by_model[model]["output"] += usage_line["output_tokens"]
-            by_model[model]["cache_read"] += usage_line["cache_read_tokens"]
-            by_model[model]["cache_write"] += usage_line["cache_write_tokens"]
+        for usage_line in _lines_for(path, lines_by_path):
+            _add_to_bucket(by_model[usage_line["model"]], usage_line)
             requests += 1
             if usage_line["timestamp"] and (last_timestamp is None or usage_line["timestamp"] > last_timestamp):
                 last_timestamp = usage_line["timestamp"]
@@ -424,13 +606,11 @@ def build_subagent_breakdown(group, config_data):
         cost = 0.0
         has_priced_model = False
         for model, tokens in by_model.items():
-            if model not in config_data:
+            model_cost = book.cost(model, tokens)
+            if model_cost is None:
                 continue
             has_priced_model = True
-            cost += calculate_call_cost(
-                model, tokens["input"], tokens["output"],
-                cached_read_tokens=tokens["cache_read"], cached_write_tokens=tokens["cache_write"]
-            )
+            cost += model_cost
 
         meta = _read_subagent_meta(path)
 
@@ -445,6 +625,7 @@ def build_subagent_breakdown(group, config_data):
             "cache_read_tokens": sum(m["cache_read"] for m in by_model.values()),
             "cache_write_tokens": sum(m["cache_write"] for m in by_model.values()),
             "cost": cost if has_priced_model else None,
+            "cost_estimated": any(book.is_estimated(m) for m in by_model),
             "last_timestamp": last_timestamp,
             "mtime": _safe_mtime(path),
         })
@@ -460,13 +641,19 @@ def get_session_breakdown(session_id, config_data):
     session_summary is None if the session no longer exists (e.g. its
     transcript was removed between the picker list and this call).
     """
-    for group in find_session_groups():
-        if group["main"].stem == session_id:
-            return (
-                build_session_summary(group, config_data),
-                build_subagent_breakdown(group, config_data),
-                build_mcp_call_log(group, config_data),
-            )
+    groups = find_session_groups()
+    with _scan(groups):
+        # Rates learned from every session's cost records, so a model is
+        # priced the same here as in Options 1 and 2.
+        book = build_price_book(config_data, groups)
+        owned = _dedupe_across(groups)
+        for group in groups:
+            if group["main"].stem == session_id:
+                return (
+                    _summarize(group, config_data, now=None, book=book, owned=owned),
+                    build_subagent_breakdown(group, config_data, book=book, lines_by_path=owned),
+                    build_mcp_call_log(group, config_data, book=book, lines_by_path=owned),
+                )
     return None, [], []
 
 
@@ -485,18 +672,48 @@ def watch_session_breakdown(session_id, config_data, refresh_seconds=3):
             live.update(snapshot())
 
 
+def _summarize(group, config_data, now, book, owned):
+    """
+    build_session_summary() over the lines this session OWNS (see
+    _dedupe_across), falling back to a zero-usage summary for a session whose
+    every message is a copy from another one - a resumed session nothing new
+    was sent in. Dropping it would hide a real transcript file from Option 1
+    and, worse, from Option 5's cleanup list.
+    """
+    summary = build_session_summary(group, config_data, now=now, book=book, lines_by_path=owned)
+    if summary is not None:
+        return summary
+    summary = build_session_summary(group, config_data, now=now, book=book)
+    if summary is None:
+        return None
+    summary.update({
+        "by_model": {}, "main_requests": 0, "subagent_requests": 0,
+        "input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0, "cache_write_tokens": 0,
+        "cost": None, "pricing": {}, "cost_estimated": False,
+        "copied_only": True,
+    })
+    return summary
+
+
 def get_all_sessions(config_data, now=None):
     """Return a summary per local Claude Code session, most recently active first."""
+    return _all_sessions_with_book(config_data, now)[0]
+
+
+def _all_sessions_with_book(config_data, now=None):
+    """get_all_sessions() plus the PriceBook it priced them with."""
     now = time.time() if now is None else now
     summaries = []
     groups = find_session_groups()
     with _scan(groups):
+        book = build_price_book(config_data, groups)
+        owned = _dedupe_across(groups)
         for group in groups:
-            summary = build_session_summary(group, config_data, now=now)
+            summary = _summarize(group, config_data, now, book, owned)
             if summary:
                 summaries.append(summary)
     summaries.sort(key=lambda s: s["mtime"], reverse=True)
-    return summaries
+    return summaries, book
 
 
 def get_cleanup_candidates(config_data, now=None, threshold_seconds=CLEANUP_INACTIVE_THRESHOLD_SECONDS):
@@ -513,7 +730,9 @@ def get_cleanup_candidates(config_data, now=None, threshold_seconds=CLEANUP_INAC
     candidates = []
     groups = find_session_groups()
     with _scan(groups):
-        summaries = [(group, build_session_summary(group, config_data, now=now)) for group in groups]
+        book = build_price_book(config_data, groups)
+        owned = _dedupe_across(groups)
+        summaries = [(group, _summarize(group, config_data, now, book, owned)) for group in groups]
     for group, summary in summaries:
         if summary is None:
             continue
@@ -562,9 +781,9 @@ def get_global_usage_summary(config_data):
     from local transcripts alone. It cannot reproduce `/usage`'s plan-limit
     percentage bars, which require a live call to Anthropic's usage endpoint.
     """
-    sessions = get_all_sessions(config_data)
+    sessions, book = _all_sessions_with_book(config_data)
 
-    global_by_model = defaultdict(lambda: {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0})
+    global_by_model = defaultdict(_new_bucket)
     by_project = defaultdict(lambda: {"cost": 0.0, "has_priced_model": False, "requests": 0, "input": 0, "output": 0})
     total_requests = 0
     last_timestamp = None
@@ -572,16 +791,15 @@ def get_global_usage_summary(config_data):
     for s in sessions:
         for model, tokens in s["by_model"].items():
             bucket = global_by_model[model]
-            bucket["input"] += tokens["input"]
-            bucket["output"] += tokens["output"]
-            bucket["cache_read"] += tokens["cache_read"]
-            bucket["cache_write"] += tokens["cache_write"]
+            for field, value in tokens.items():
+                bucket[field] = bucket.get(field, 0) + value
 
         project_label = os.path.basename(s["cwd"]) if s.get("cwd") else s["project"]
         project = by_project[project_label]
         if s["cost"] is not None:
             project["cost"] += s["cost"]
             project["has_priced_model"] = True
+            project["cost_estimated"] = project.get("cost_estimated", False) or s.get("cost_estimated", False)
         session_requests = s["main_requests"] + s["subagent_requests"]
         project["requests"] += session_requests
         project["input"] += s["input_tokens"]
@@ -594,22 +812,27 @@ def get_global_usage_summary(config_data):
     usage_by_model = []
     total_cost = 0.0
     any_priced = False
+    any_estimated = False
     for model, tokens in global_by_model.items():
-        cost = None
-        if model in config_data:
-            cost = calculate_call_cost(
-                model, tokens["input"], tokens["output"],
-                cached_read_tokens=tokens["cache_read"], cached_write_tokens=tokens["cache_write"]
-            )
+        cost = book.cost(model, tokens)
+        if cost is not None:
             total_cost += cost
             any_priced = True
-        usage_by_model.append({"model": model, **tokens, "cost": cost})
+        pricing = book.get(model)
+        source = pricing["pricing_source"] if pricing else None
+        any_estimated = any_estimated or source == "estimated"
+        usage_by_model.append({
+            "model": model, **tokens, "cost": cost,
+            "pricing_source": source,
+            "based_on": pricing.get("based_on") if pricing else None,
+        })
     usage_by_model.sort(key=lambda m: (m["cost"] or 0), reverse=True)
 
     projects = [
         {
             "project": project,
             "cost": data["cost"] if data["has_priced_model"] else None,
+            "cost_estimated": data.get("cost_estimated", False),
             "requests": data["requests"],
             "input": data["input"],
             "output": data["output"]
@@ -622,6 +845,7 @@ def get_global_usage_summary(config_data):
         "session_count": len(sessions),
         "total_requests": total_requests,
         "total_cost": total_cost if any_priced else None,
+        "total_cost_estimated": any_estimated,
         "usage_by_model": usage_by_model,
         "projects": projects,
         "last_timestamp": last_timestamp
@@ -671,24 +895,23 @@ def get_rolling_window_usage(config_data, now=None):
         "7d": {"cutoff": now - timedelta(days=7), "duration": timedelta(days=7)},
     }
     for w in windows.values():
-        w.update({"input": 0, "output": 0, "cache_read": 0, "cache_write": 0, "requests": 0, "cost": 0.0, "any_priced": False, "window_start_at": None})
+        w.update({"input": 0, "output": 0, "cache_read": 0, "cache_write": 0, "requests": 0, "cost": 0.0,
+                  "any_priced": False, "cost_estimated": False, "window_start_at": None})
 
     groups = find_session_groups()
     with _scan(groups):
-        lines = [line for group in groups for path in [group["main"], *group["subagents"]]
-                 for line in _iter_usage_lines(path)]
+        book = build_price_book(config_data, groups)
+        owned = _dedupe_across(groups)
+        lines = [line for group in groups for path in _group_paths(group)
+                 for line in owned.get(str(path), ())]
     for usage_line in lines:
         ts = _parse_timestamp(usage_line["timestamp"])
         if ts is None:
             continue
 
         model = usage_line["model"]
-        cost = None
-        if model in config_data:
-            cost = calculate_call_cost(
-                model, usage_line["input_tokens"], usage_line["output_tokens"],
-                cached_read_tokens=usage_line["cache_read_tokens"], cached_write_tokens=usage_line["cache_write_tokens"]
-            )
+        cost = book.cost(model, _line_bucket(usage_line))
+        estimated = book.is_estimated(model)
 
         for w in windows.values():
             if ts < w["cutoff"] or ts > now:
@@ -701,6 +924,7 @@ def get_rolling_window_usage(config_data, now=None):
             if cost is not None:
                 w["cost"] += cost
                 w["any_priced"] = True
+                w["cost_estimated"] = w["cost_estimated"] or estimated
             if w["window_start_at"] is None or ts < w["window_start_at"]:
                 w["window_start_at"] = ts
 
@@ -730,6 +954,7 @@ def get_rolling_window_usage(config_data, now=None):
             "cache_write": w["cache_write"],
             "requests": w["requests"],
             "cost": w["cost"] if w["any_priced"] else None,
+            "cost_estimated": w["cost_estimated"],
             "window_start_at": w["window_start_at"],
             "window_end_at": window_end_at,
             "remaining_seconds": remaining_seconds,

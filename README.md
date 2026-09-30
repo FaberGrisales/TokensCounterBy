@@ -109,7 +109,25 @@ Si en el paso 4 sigues viendo solo dólares, vuelve a la Opción 7: diagnostica 
 
 Todo lo demás (Opciones 1, 3, 4 y 5) funciona desde el primer momento sin configurar nada.
 
-Los precios por modelo de Claude viven en `tokens_counter/models_config.json` (editable a mano) — de ahí sale el costo que ves en las Opciones 1 y 2.
+Los precios por modelo de Claude viven en `tokens_counter/models_config.json` (editable a mano) — de ahí sale el costo que ves en las Opciones 1 y 2. **No hace falta agregar cada modelo nuevo a mano**: ver [Modelos nuevos y precios](#-modelos-nuevos-y-precios).
+
+### 💲 Modelos nuevos y precios
+
+Cuando Claude Code empieza a usar un modelo que no está en `models_config.json`, la app lo resuelve sola, sin conexión a internet, en este orden:
+
+| Origen | Cuándo aplica | Cómo se muestra |
+|---|---|---|
+| **configured** | El modelo está tal cual en `models_config.json`. | Costo normal. |
+| **alias** | Es otra forma de escribir un modelo configurado: sufijo de fecha (`claude-haiku-4-5-20251001`), `[1m]`, Bedrock (`us.anthropic.…-v1:0`) o Vertex (`…@fecha`). | Costo normal (es el mismo modelo). |
+| **learned** | Claude Code dejó registros `cost-state` en tus transcripts con lo que **él mismo** cobró. La app deduce la tarifa si al menos 2 registros distintos coinciden en el mismo centavo y ningún otro registro la contradice. | Costo normal; la Opción 2 indica de dónde salió. |
+| **estimated** | Modelo nuevo de una familia conocida (`claude-opus-5-6` → toma las tarifas de `claude-opus-5-5`, la versión anterior más cercana; nunca de una familia con más de una versión mayor de diferencia). | Con `~` delante (`~$12.30`) y una nota en la Opción 2 que dice de qué modelo tomó el precio. |
+
+Un modelo que no es de Claude (o de una familia desconocida) sigue saliendo `N/A`: la app no inventa precios. Lo que pongas a mano en `models_config.json` siempre tiene prioridad.
+
+**Cómo se calcula el costo** (igual que Claude Code — verificado contra su propio `costUSD` hasta el último decimal):
+- Cada respuesta se cuenta **una sola vez**, aunque Claude Code la escriba en varias líneas del transcript (una por bloque: thinking, texto, cada herramienta). Una sesión retomada tampoco vuelve a contar la conversación que copió de la sesión original.
+- La escritura de caché de **1 hora** (la que usa Claude Code) cuesta 2x el input; la de 5 minutos, 1.25x.
+- Las búsquedas web se cobran aparte: $10 por cada 1,000.
 
 ---
 
@@ -149,7 +167,7 @@ La Opción 2 muestra OpenCode en una sección aparte (ver abajo). Las Opciones 4
 En los modos angostos los números se abrevian (`933.1K`, `1.2M`), y un costo menor a un centavo sale como `<$0.01`, nunca como `$0.00` (que se leería como "gratis").
 
 **Notas:**
-- El costo se calcula con las tarifas de `tokens_counter/models_config.json`. Si una sesión usa un modelo que no está en esa tabla, su costo se muestra como `N/A` (los tokens sí se cuentan). Puedes agregar o ajustar precios editando ese archivo directamente.
+- El costo se calcula con las tarifas de `tokens_counter/models_config.json`. Un modelo que no está ahí se resuelve solo (ver [Modelos nuevos y precios](#-modelos-nuevos-y-precios)); si es estimado, el costo sale con `~`. Solo un modelo que no es de Claude sale como `N/A` (los tokens sí se cuentan). Puedes agregar o ajustar precios editando ese archivo directamente.
 - Puedes apuntar el monitor a una ubicación distinta de `~/.claude` definiendo la variable de entorno `CLAUDE_CONFIG_DIR` antes de lanzar `start.py`, igual que hace Claude Code.
 - El formato interno de estos archivos `.jsonl` es un detalle de implementación de Claude Code y podría cambiar en versiones futuras; si eso ocurre, el monitor simplemente mostrará menos datos en vez de fallar.
 

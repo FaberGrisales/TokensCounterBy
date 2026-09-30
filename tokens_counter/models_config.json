@@ -148,5 +148,75 @@
         "cache_read_cost_per_1m": 0.0,
         "supports_caching": false,
         "context_window": 200000
+    },
+    "claude-opus-4-5": {
+        "name": "Claude Opus 4.5",
+        "provider": "Anthropic Claude",
+        "input_cost_per_1m": 5.0,
+        "output_cost_per_1m": 25.0,
+        "cache_write_cost_per_1m": 6.25,
+        "cache_read_cost_per_1m": 0.5,
+        "supports_caching": true,
+        "context_window": 200000
+    },
+    "claude-opus-4-1": {
+        "name": "Claude Opus 4.1",
+        "provider": "Anthropic Claude",
+        "input_cost_per_1m": 15.0,
+        "output_cost_per_1m": 75.0,
+        "cache_write_cost_per_1m": 18.75,
+        "cache_read_cost_per_1m": 1.5,
+        "supports_caching": true,
+        "context_window": 200000
+    },
+    "claude-opus-4": {
+        "name": "Claude Opus 4",
+        "provider": "Anthropic Claude",
+        "input_cost_per_1m": 15.0,
+        "output_cost_per_1m": 75.0,
+        "cache_write_cost_per_1m": 18.75,
+        "cache_read_cost_per_1m": 1.5,
+        "supports_caching": true,
+        "context_window": 200000
+    },
+    "claude-sonnet-4-5": {
+        "name": "Claude Sonnet 4.5",
+        "provider": "Anthropic Claude",
+        "input_cost_per_1m": 3.0,
+        "output_cost_per_1m": 15.0,
+        "cache_write_cost_per_1m": 3.75,
+        "cache_read_cost_per_1m": 0.3,
+        "supports_caching": true,
+        "context_window": 200000
+    },
+    "claude-sonnet-4": {
+        "name": "Claude Sonnet 4",
+        "provider": "Anthropic Claude",
+        "input_cost_per_1m": 3.0,
+        "output_cost_per_1m": 15.0,
+        "cache_write_cost_per_1m": 3.75,
+        "cache_read_cost_per_1m": 0.3,
+        "supports_caching": true,
+        "context_window": 200000
+    },
+    "claude-3-7-sonnet": {
+        "name": "Claude 3.7 Sonnet (legacy)",
+        "provider": "Anthropic Claude",
+        "input_cost_per_1m": 3.0,
+        "output_cost_per_1m": 15.0,
+        "cache_write_cost_per_1m": 3.75,
+        "cache_read_cost_per_1m": 0.3,
+        "supports_caching": true,
+        "context_window": 200000
+    },
+    "claude-3-haiku": {
+        "name": "Claude 3 Haiku (legacy)",
+        "provider": "Anthropic Claude",
+        "input_cost_per_1m": 0.25,
+        "output_cost_per_1m": 1.25,
+        "cache_write_cost_per_1m": 0.3,
+        "cache_read_cost_per_1m": 0.03,
+        "supports_caching": true,
+        "context_window": 200000
     }
 }

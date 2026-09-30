@@ -105,11 +105,14 @@ def _fmt_tokens(n):
     return str(n)
 
 
-def _fmt_cost(cost, compact=False):
+def _fmt_cost(cost, compact=False, estimated=False):
     """
     Cost as a string, or a dim N/A for an unpriced model. The compact form
     trades the 4-decimal precision for width, but never rounds a real cost
     down to a flat $0.00 - that would read as "this was free".
+
+    `estimated` prefixes a "~": the cost includes a model priced from a
+    sibling version's rates (pricing.py), not its own.
     """
     if cost is None:
         return "[dim]N/A[/]"
@@ -117,9 +120,29 @@ def _fmt_cost(cost, compact=False):
         # Exactly zero is a reported "no charge" (an OpenCode free or local
         # model), not a rounded-down real cost.
         return "free"
+    mark = "~" if estimated else ""
     if not compact:
-        return f"${cost:.4f}"
-    return f"${cost:,.2f}" if cost >= 0.01 else "<$0.01"
+        return f"{mark}${cost:.4f}"
+    return f"{mark}${cost:,.2f}" if cost >= 0.01 else f"{mark}<$0.01"
+
+
+def _pricing_note(model_rows):
+    """
+    One dim line naming every model NOT priced from its own models_config.json
+    entry, and where its rates came from - or None when all are configured.
+    """
+    notes = []
+    for m in model_rows:
+        source = m.get("pricing_source")
+        if source == "estimated":
+            notes.append(f"~ {m['model']}: estimated from {m.get('based_on')}")
+        elif source == "learned":
+            notes.append(f"{m['model']}: rates learned from {m.get('based_on')}")
+        elif source is None and m.get("cost") is None:
+            notes.append(f"{m['model']}: no price (not a recognized Claude model)")
+    if not notes:
+        return None
+    return "[dim]" + " · ".join(notes) + " — add it to models_config.json for exact rates.[/]"
 
 
 def _context_bar(percent, length=10):
@@ -249,7 +272,10 @@ def render_session_monitor_view(sessions):
     idle = [s for s in sessions if not s["is_active"]]
 
     total_cost = sum(s["cost"] for s in sessions if s["cost"] is not None)
-    unpriced_count = sum(1 for s in sessions if s["cost"] is None)
+    total_estimated = any(s.get("cost_estimated") for s in sessions)
+    # A resumed session whose messages are all copies of an earlier one has
+    # nothing of its own to price - that isn't a missing price.
+    unpriced_count = sum(1 for s in sessions if s["cost"] is None and not s.get("copied_only"))
     total_input = sum(s["input_tokens"] for s in sessions)
     total_output = sum(s["output_tokens"] for s in sessions)
 
@@ -259,13 +285,13 @@ def render_session_monitor_view(sessions):
         header_lines = [
             f"[bold green]●[/] {len(active)} live   [dim]○[/] {len(idle)} idle",
             f"[cyan]In[/] {_fmt_tokens(total_input)}   [magenta]Out[/] {_fmt_tokens(total_output)}",
-            f"[bold yellow]Spend[/] {_fmt_cost(total_cost, compact=True)}",
+            f"[bold yellow]Spend[/] {_fmt_cost(total_cost, compact=True, estimated=total_estimated)}",
         ]
     else:
         header_lines = [
             f"[bold green]● Active sessions:[/] {len(active)}   [dim]○ Idle (5+ min):[/] {len(idle)}",
             f"[cyan]Total Input:[/] {total_input:,}  |  [magenta]Total Output:[/] {total_output:,}",
-            f"[bold yellow]Estimated Total Spend:[/] ${total_cost:.4f}"
+            f"[bold yellow]Estimated Total Spend:[/] {'~' if total_estimated else ''}${total_cost:.4f}"
         ]
     if unpriced_count:
         header_lines.append(f"[dim](+{unpriced_count} unpriced)[/]" if compact
@@ -291,7 +317,7 @@ def render_session_monitor_view(sessions):
                 lines.append(f"{dot} {_tool_label(s_, short=True)} [bold green]{project_label}[/]")
                 lines.append(
                     f"  {_fmt_tokens(s_['input_tokens'] + s_['output_tokens'])}"
-                    f"  [bold yellow]{_fmt_cost(s_['cost'], compact=True)}[/]"
+                    f"  [bold yellow]{_fmt_cost(s_['cost'], compact=True, estimated=s_.get('cost_estimated'))}[/]"
                     f"  {_context_bar(s_.get('context_percent'), length=4)}"
                 )
             if not sessions:
@@ -318,7 +344,7 @@ def render_session_monitor_view(sessions):
                 _tool_label(s_, short=True),
                 project_label,
                 _fmt_tokens(s_["input_tokens"] + s_["output_tokens"]),
-                _fmt_cost(s_["cost"], compact=True),
+                _fmt_cost(s_["cost"], compact=True, estimated=s_.get("cost_estimated")),
                 _context_bar(s_.get("context_percent"), length=5),
             )
 
@@ -351,12 +377,14 @@ def render_session_monitor_view(sessions):
         subagent_note = f" [dim](+{s['subagent_count']} subagent(s))[/]" if s["subagent_count"] else ""
         reqs = f"{s['main_requests']}{subagent_note}"
 
-        cost_str = _fmt_cost(s["cost"])
+        cost_str = ("[dim]copy of an earlier session[/]" if s.get("copied_only")
+                    else _fmt_cost(s["cost"], estimated=s.get("cost_estimated")))
 
         last_req = s.get("last_request")
         if last_req:
             last_tokens = f"{last_req['input_tokens']:,} / {last_req['output_tokens']:,}"
-            last_cost_str = _fmt_cost(s.get("last_request_cost"))
+            last_estimated = (s.get("pricing") or {}).get(last_req.get("model")) == "estimated"
+            last_cost_str = _fmt_cost(s.get("last_request_cost"), estimated=last_estimated)
         else:
             last_tokens = "-"
             last_cost_str = "-"
@@ -414,7 +442,7 @@ def render_session_breakdown_view(session_id, session_summary, subagents, mcp_ca
     subagent_table.add_column("Cost", justify="right", style="bold yellow")
 
     for a in subagents[:15]:
-        cost_str = f"${a['cost']:.4f}" if a["cost"] is not None else "[dim]N/A[/]"
+        cost_str = _fmt_cost(a["cost"], estimated=a.get("cost_estimated"))
         subagent_table.add_row(
             a["agent_type"],
             a.get("description") or "[dim]-[/]",
@@ -435,7 +463,7 @@ def render_session_breakdown_view(session_id, session_summary, subagents, mcp_ca
     mcp_table.add_column("Turn Cost", justify="right", style="bold yellow")
 
     for c in mcp_calls[:15]:
-        cost_str = f"${c['cost']:.4f}" if c["cost"] is not None else "[dim]N/A[/]"
+        cost_str = _fmt_cost(c["cost"], estimated=c.get("cost_estimated"))
         tool_labels = []
         for name in c["tools"]:
             rest = name[len("mcp__"):] if name.startswith("mcp__") else name
@@ -504,7 +532,7 @@ def _build_subscription_status_renderables(status, rolling_usage=None, plan_limi
 
         for key, label in (("5h", "Last 5 hours"), ("7d", "Last 7 days")):
             w = rolling_usage.get(key, {})
-            cost_str = f"${w['cost']:.4f}" if w.get("cost") is not None else "[dim]N/A[/]"
+            cost_str = _fmt_cost(w.get("cost"), estimated=w.get("cost_estimated"))
             window_table.add_row(
                 label,
                 f"{w.get('requests', 0):,}",
@@ -646,7 +674,8 @@ def _build_usage_summary_renderables(data):
     if not data["session_count"]:
         return ["[yellow]No Claude Code sessions found on this machine.[/]"]
 
-    cost_str = f"${data['total_cost']:.4f}" if data["total_cost"] is not None else "[dim]N/A (no priced model found)[/]"
+    cost_str = (_fmt_cost(data["total_cost"], estimated=data.get("total_cost_estimated"))
+                if data["total_cost"] is not None else "[dim]N/A (no priced model found)[/]")
     header = Panel(
         f"[bold yellow]Sessions found:[/] {data['session_count']}   [bold yellow]Total Requests:[/] {data['total_requests']:,}\n"
         f"[bold green]Total Estimated Cost:[/] {cost_str}",
@@ -670,7 +699,7 @@ def _build_usage_summary_renderables(data):
     model_table.add_column("Cost", justify="right", style="bold yellow")
 
     for m in model_rows[:MAX_TABLE_ROWS]:
-        cost_cell = f"${m['cost']:.4f}" if m["cost"] is not None else "[dim]N/A[/]"
+        cost_cell = _fmt_cost(m["cost"], estimated=m.get("pricing_source") == "estimated")
         model_table.add_row(
             m["model"],
             f"{m['input']:,}",
@@ -684,6 +713,9 @@ def _build_usage_summary_renderables(data):
     elif len(model_rows) > MAX_TABLE_ROWS:
         model_table.add_row(f"[dim]+{len(model_rows) - MAX_TABLE_ROWS} more[/]", "", "", "", "", "")
     renderables.append(model_table)
+    note = _pricing_note(model_rows)
+    if note:
+        renderables.append(note)
 
     # By project — /usage doesn't have this (it's scoped to one session), but
     # this app sees every project's sessions, so it's a natural extension.
@@ -696,7 +728,7 @@ def _build_usage_summary_renderables(data):
     project_table.add_column("Est. Cost", justify="right", style="bold yellow")
 
     for p in project_rows[:MAX_TABLE_ROWS]:
-        cost_cell = f"${p['cost']:.4f}" if p["cost"] is not None else "[dim]N/A[/]"
+        cost_cell = _fmt_cost(p["cost"], estimated=p.get("cost_estimated"))
         project_table.add_row(
             p["project"],
             f"{p['requests']:,}",
@@ -796,7 +828,7 @@ def render_cleanup_candidates(candidates):
     for i, c in enumerate(candidates, start=1):
         project_label = os.path.basename(c["cwd"]) if c.get("cwd") else c["project"]
         session_label = f"{project_label}\n[dim]{c['session_id'][:8]}…[/]"
-        cost_str = f"${c['cost']:.4f}" if c["cost"] is not None else "[dim]N/A[/]"
+        cost_str = _fmt_cost(c["cost"], estimated=c.get("cost_estimated"))
         table.add_row(
             str(i),
             session_label,

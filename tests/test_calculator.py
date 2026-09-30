@@ -20,6 +20,7 @@ from tokens_counter import claude_config
 from tokens_counter import tui
 from tokens_counter import dependencies
 from tokens_counter import floating
+from tokens_counter import pricing
 
 
 _REAL_ENV = {}
@@ -96,12 +97,12 @@ class TestTokensCalculator(unittest.TestCase):
     def test_cost_calculation_opus_5(self):
         """Opus 5 is the model these transcripts are dominated by, so price it exactly."""
         # claude-opus-5: input $5.00/1M, output $25.00/1M, cache read $0.50/1M.
-        # 100,000 total input of which 90,000 is a cache read, 5,000 output.
-        # Standard input: (100,000 - 90,000) * 5 / 1M   = $0.05
-        # Cache read:     90,000 * 0.5 / 1M             = $0.045
-        # Output:         5,000 * 25 / 1M               = $0.125
-        # Total                                          = $0.22
-        cost = calculate_call_cost("claude-opus-5", 100000, 5000, cached_read_tokens=90000)
+        # 10,000 uncached input, plus 90,000 read from cache, 5,000 output.
+        # Input:      10,000 * 5 / 1M    = $0.05
+        # Cache read: 90,000 * 0.5 / 1M  = $0.045
+        # Output:     5,000 * 25 / 1M    = $0.125
+        # Total                          = $0.22
+        cost = calculate_call_cost("claude-opus-5", 10000, 5000, cached_read_tokens=90000)
         self.assertAlmostEqual(cost, 0.22)
 
     def test_cost_calculation_claude_with_cache(self):
@@ -109,13 +110,13 @@ class TestTokensCalculator(unittest.TestCase):
         # Claude 3.5 Sonnet:
         # input_cost_per_1m: 3.00, output_cost_per_1m: 15.00
         # cache_read_cost_per_1m: 0.30, cache_write_cost_per_1m: 3.75
-        # Call with: 10,000 total input, where 8,000 read from cache, 0 write, 2,000 output.
-        # Standard input tokens = 10,000 - 8,000 = 2,000 tokens
-        # Standard input cost: 2,000 * 3 / 1M = $0.006
+        # Call with: 2,000 uncached input, plus 8,000 read from cache, 2,000 output
+        # (the API's additive convention - cache counts are NOT inside input).
+        # Input cost: 2,000 * 3 / 1M = $0.006
         # Cache read cost: 8,000 * 0.3 / 1M = $0.0024
         # Output cost: 2,000 * 15 / 1M = $0.03
         # Expected Total: 0.006 + 0.0024 + 0.03 = $0.0384
-        cost = calculate_call_cost("claude-3-5-sonnet", 10000, 2000, cached_read_tokens=8000)
+        cost = calculate_call_cost("claude-3-5-sonnet", 2000, 2000, cached_read_tokens=8000)
         self.assertAlmostEqual(cost, 0.0384)
 
 def _usage_line(model, input_tokens, output_tokens, cache_read=0, cache_write=0, timestamp="2026-01-01T00:00:00.000Z", cwd="/home/user/project", tool_names=None):
@@ -593,6 +594,394 @@ class TestSessionMonitor(unittest.TestCase):
         self._write_session("proj-t", "session20", [_usage_line("claude-3-5-sonnet", 100, 50)])
         group = session_monitor.find_session_groups()[0]
         self.assertEqual(session_monitor.build_mcp_call_log(group, self.config_data), [])
+
+
+def _raw_line(model, message_id=None, request_id=None, input_tokens=0, output_tokens=0, cache_read=0,
+              cache_write=0, cache_write_1h=0, web_search=0, timestamp="2026-01-01T00:00:00.000Z",
+              tool_names=None, cwd="/home/user/project"):
+    """A transcript line with the fields real Claude Code lines carry (ids, cache TTL split)."""
+    usage = {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "cache_read_input_tokens": cache_read,
+        "cache_creation_input_tokens": cache_write,
+        "cache_creation": {"ephemeral_1h_input_tokens": cache_write_1h,
+                           "ephemeral_5m_input_tokens": cache_write - cache_write_1h},
+        "server_tool_use": {"web_search_requests": web_search, "web_fetch_requests": 0},
+    }
+    message = {"model": model, "usage": usage}
+    if message_id:
+        message["id"] = message_id
+    if tool_names:
+        message["content"] = [{"type": "tool_use", "name": n, "input": {}} for n in tool_names]
+    entry = {"type": "assistant", "timestamp": timestamp, "cwd": cwd, "message": message}
+    if request_id:
+        entry["requestId"] = request_id
+    return json.dumps(entry)
+
+
+def _cost_state(model_usage, unknown=False):
+    """A Claude Code `cost-state` record, as it appears in a transcript."""
+    return json.dumps({
+        "type": "cost-state", "sessionId": "s", "totalCostUSD": 0, "totalLinesAdded": 3,
+        "modelUsage": model_usage, "hasUnknownModelCost": unknown,
+    })
+
+
+def _model_usage(inp, out, read, write, cost, web=0):
+    return {"inputTokens": inp, "outputTokens": out, "thinkingTokens": 0,
+            "cacheReadInputTokens": read, "cacheCreationInputTokens": write,
+            "webSearchRequests": web, "costUSD": cost}
+
+
+class TestPricingResolution(unittest.TestCase):
+    """A model id Claude Code starts using must price without editing models_config.json."""
+
+    def setUp(self):
+        self.config = load_config()
+
+    def test_normalize_strips_every_spelling_of_the_same_model(self):
+        cases = {
+            "claude-haiku-4-5-20251001": "claude-haiku-4-5",
+            "claude-opus-4-6[1m]": "claude-opus-4-6",
+            "us.anthropic.claude-sonnet-4-6-v1:0": "claude-sonnet-4-6",
+            "anthropic.claude-opus-5-v2": "claude-opus-5",
+            "global.anthropic.claude-opus-5": "claude-opus-5",
+            "claude-opus-4-1@20250805": "claude-opus-4-1",
+            "anthropic/claude-sonnet-5": "claude-sonnet-5",
+            "Claude-Opus-5-Latest": "claude-opus-5",
+        }
+        for raw, expected in cases.items():
+            self.assertEqual(pricing.normalize_model_id(raw), expected, raw)
+
+    def test_parse_model_id_handles_modern_and_legacy_ids(self):
+        self.assertEqual(pricing.parse_model_id("claude-opus-4-8"), ("opus", (4, 8)))
+        self.assertEqual(pricing.parse_model_id("claude-sonnet-5"), ("sonnet", (5, 0)))
+        self.assertEqual(pricing.parse_model_id("claude-3-5-sonnet"), ("sonnet", (3, 5)))
+        self.assertEqual(pricing.parse_model_id("claude-3-opus"), ("opus", (3, 0)))
+        self.assertIsNone(pricing.parse_model_id("gpt-5"))
+        self.assertIsNone(pricing.parse_model_id("<synthetic>"))
+
+    def test_configured_model_is_exact(self):
+        p = pricing.resolve_pricing("claude-opus-5", self.config)
+        self.assertEqual(p["pricing_source"], "configured")
+        self.assertEqual(p["input_cost_per_1m"], self.config["claude-opus-5"]["input_cost_per_1m"])
+
+    def test_dated_and_bedrock_ids_are_aliases_not_estimates(self):
+        p = pricing.resolve_pricing("claude-opus-5-20260101", self.config)
+        self.assertEqual((p["pricing_source"], p["based_on"]), ("alias", "claude-opus-5"))
+        p = pricing.resolve_pricing("us.anthropic.claude-sonnet-4-6-v1:0", self.config)
+        self.assertEqual((p["pricing_source"], p["based_on"]), ("alias", "claude-sonnet-4-6"))
+
+    def test_new_version_is_estimated_from_its_newest_sibling(self):
+        p = pricing.resolve_pricing("claude-opus-5-6", self.config)
+        self.assertEqual((p["pricing_source"], p["based_on"]), ("estimated", "claude-opus-5-5"))
+        self.assertEqual(p["context_window"], self.config["claude-opus-5-5"]["context_window"])
+
+    def test_estimate_borrows_from_the_newest_older_sibling(self):
+        """claude-opus-4-9 is priced like Opus 4.8 (the release it would replace)."""
+        p = pricing.resolve_pricing("claude-opus-4-9", self.config)
+        self.assertEqual((p["pricing_source"], p["based_on"]), ("estimated", "claude-opus-4-8"))
+
+    def test_older_models_across_a_price_change_are_configured_not_estimated(self):
+        """Opus was $15 until 4.5 dropped it to $5; a 4.1 transcript must not price at $5."""
+        for model in ("claude-opus-4-1", "claude-opus-4-1-20250805", "us.anthropic.claude-opus-4-1-20250805-v1:0",
+                      "claude-opus-4-20250514", "claude-opus-4-0"):
+            p = pricing.resolve_pricing(model, self.config)
+            self.assertIn(p["pricing_source"], ("configured", "alias"), model)
+            self.assertEqual(p["input_cost_per_1m"], 15.0, model)
+        self.assertEqual(pricing.resolve_pricing("claude-3-haiku-20240307", self.config)["input_cost_per_1m"], 0.25)
+
+    def test_no_estimate_across_more_than_one_major_version(self):
+        self.assertEqual(pricing.resolve_pricing("claude-opus-6", self.config)["based_on"], "claude-opus-5-5")
+        for model in ("claude-opus-10", "claude-opus-99999999999"):
+            self.assertIsNone(pricing.resolve_pricing(model, self.config), model)
+
+    def test_unrecognized_models_stay_unpriced(self):
+        for model in ("gpt-5", "claude-nova-1", "some-unknown-future-model", "", None):
+            self.assertIsNone(pricing.resolve_pricing(model, self.config), model)
+
+    def test_one_hour_cache_writes_cost_twice_input(self):
+        rates = {"input_cost_per_1m": 5.0, "output_cost_per_1m": 25.0, "cache_read_cost_per_1m": 0.5,
+                 "cache_write_cost_per_1m": 6.25, "supports_caching": True}
+        five_min = pricing.token_cost(rates, cache_write=1_000_000)
+        one_hour = pricing.token_cost(rates, cache_write=1_000_000, cache_write_1h=1_000_000)
+        self.assertAlmostEqual(five_min, 6.25)
+        self.assertAlmostEqual(one_hour, 10.0)
+
+    def test_reproduces_claude_codes_own_cost_to_the_cent(self):
+        """A real cost-state record from this machine: Claude Code charged $5.9761005."""
+        p = pricing.resolve_pricing("claude-opus-5", self.config)
+        cost = pricing.token_cost(p, input_tokens=2, output_tokens=1950, cache_read=18681,
+                                  cache_write=591800, cache_write_1h=591800)
+        self.assertAlmostEqual(cost, 5.9761005, places=6)
+
+    def test_web_search_is_billed_per_request(self):
+        p = pricing.resolve_pricing("claude-haiku-4-5", self.config)
+        self.assertAlmostEqual(pricing.token_cost(p, web_search_requests=4), 0.04)
+
+    def test_calculate_call_cost_uses_the_additive_convention(self):
+        """Cached tokens are NOT inside input_tokens - the old subtraction zeroed real input cost."""
+        cost = calculate_call_cost("claude-opus-5", 1000, 0, cached_read_tokens=1_000_000)
+        self.assertAlmostEqual(cost, 1000 * 5 / 1e6 + 0.5)
+
+
+class TestLearnedRates(unittest.TestCase):
+    """Rates recovered from Claude Code's own cost-state records."""
+
+    def _rates(self, *records):
+        return pricing.learn_rates([{"modelUsage": m, "hasUnknownModelCost": u} for m, u in records])
+
+    @staticmethod
+    def _cost(rate, inp, out, read, write):
+        return rate * (inp + 5 * out + 0.1 * read + 2 * write) / 1e6
+
+    def test_two_different_records_agreeing_on_a_cent_teach_a_rate(self):
+        learned = self._rates(
+            ({"claude-zeta-9": _model_usage(100, 20000, 900000, 50000, self._cost(7, 100, 20000, 900000, 50000))}, False),
+            ({"claude-zeta-9": _model_usage(5, 3000, 4000000, 9000, self._cost(7, 5, 3000, 4000000, 9000))}, False),
+        )
+        self.assertEqual(learned["claude-zeta-9"]["input_cost_per_1m"], 7.0)
+        self.assertEqual(learned["claude-zeta-9"]["output_cost_per_1m"], 35.0)
+        self.assertEqual(learned["claude-zeta-9"]["pricing_source"], "learned")
+
+    def test_a_single_record_is_not_enough(self):
+        learned = self._rates(
+            ({"claude-zeta-9": _model_usage(100, 20000, 900000, 50000, self._cost(7, 100, 20000, 900000, 50000))}, False),
+        )
+        self.assertEqual(learned, {})
+
+    def test_the_same_record_twice_is_still_one_record(self):
+        """Claude Code rewrites a cost-state with identical numbers; that's not agreement."""
+        usage = _model_usage(100, 20000, 900000, 50000, self._cost(7, 100, 20000, 900000, 50000))
+        self.assertEqual(self._rates(({"claude-zeta-9": usage}, False), ({"claude-zeta-9": usage}, False)), {})
+
+    def test_records_claude_code_itself_could_not_price_are_ignored(self):
+        records = [({"claude-zeta-9": _model_usage(i, 20000, 900000, 50000, self._cost(7, i, 20000, 900000, 50000))}, True)
+                   for i in (1, 2, 3)]
+        self.assertEqual(self._rates(*records), {})
+
+    def test_a_rate_off_the_cent_grid_is_rejected(self):
+        """Non-standard multipliers (like Fable 5.1's cache read) give an odd rate per mix."""
+        records = []
+        for i, read in enumerate((900000, 4000000, 7000000)):
+            cost = (7 * (100 + i) + 35 * 20000 + 0.25 * read + 14 * 50000) / 1e6
+            records.append(({"claude-zeta-9": _model_usage(100 + i, 20000, read, 50000, cost)}, False))
+        self.assertEqual(self._rates(*records), {})
+
+    def test_learned_rate_prices_an_unconfigured_model_but_never_overrides_config(self):
+        config = load_config()
+        learned = {"claude-zeta-9": {"input_cost_per_1m": 7.0, "pricing_source": "learned"},
+                   "claude-opus-5": {"input_cost_per_1m": 99.0, "pricing_source": "learned"}}
+        self.assertEqual(pricing.resolve_pricing("claude-zeta-9", config, learned)["input_cost_per_1m"], 7.0)
+        self.assertEqual(pricing.resolve_pricing("claude-opus-5", config, learned)["pricing_source"], "configured")
+
+    def test_non_finite_costs_teach_nothing(self):
+        records = [({"claude-zeta-9": _model_usage(100000 * i, 0, 0, 0, float("inf"))}, False) for i in (1, 2, 3)]
+        records += [({"claude-zeta-9": _model_usage(100000 * i, 0, 0, 0, float("nan"))}, False) for i in (1, 2)]
+        self.assertEqual(self._rates(*records), {})
+
+    def test_cache_rates_are_only_learned_when_cache_was_exercised(self):
+        """Two cache-free records say nothing about the cache rates the result would carry."""
+        learned = self._rates(
+            ({"claude-zeta-9": _model_usage(100000, 20000, 0, 0, self._cost(7, 100000, 20000, 0, 0))}, False),
+            ({"claude-zeta-9": _model_usage(5000, 30000, 0, 0, self._cost(7, 5000, 30000, 0, 0))}, False),
+        )
+        self.assertEqual(learned, {})
+
+    def test_proportional_mixes_are_one_mix(self):
+        """1M and 2M of the same shape test nothing about the multipliers."""
+        learned = self._rates(
+            ({"claude-zeta-9": _model_usage(100, 20000, 900000, 50000, self._cost(7, 100, 20000, 900000, 50000))}, False),
+            ({"claude-zeta-9": _model_usage(200, 40000, 1800000, 100000, self._cost(7, 200, 40000, 1800000, 100000))}, False),
+        )
+        self.assertEqual(learned, {})
+
+    def test_one_contradicting_record_vetoes_the_rate(self):
+        """A special cache-read rate (like Fable 5.1's) shows up as a record the multipliers can't explain."""
+        def fable_like(inp, out, read, write):
+            return (10 * inp + 50 * out + 0.25 * read + 20 * write) / 1e6
+        agreeing = [
+            ({"claude-zeta-9": _model_usage(100000, 20000, 0, 50000, fable_like(100000, 20000, 0, 50000))}, False),
+            ({"claude-zeta-9": _model_usage(3000, 9000, 0, 90000, fable_like(3000, 9000, 0, 90000))}, False),
+        ]
+        contradicting = ({"claude-zeta-9": _model_usage(100, 2000, 9000000, 1000, fable_like(100, 2000, 9000000, 1000))}, False)
+        self.assertEqual(self._rates(*agreeing, contradicting), {})
+
+    def test_records_with_five_minute_writes_do_not_veto(self):
+        """Some writes are 5-minute: that lowers the implied rate within a known band, which is consistent."""
+        def cost(inp, out, read, write_1h, write_5m):
+            return 7 * (inp + 5 * out + 0.1 * read + 2 * write_1h + 1.25 * write_5m) / 1e6
+        learned = self._rates(
+            ({"claude-zeta-9": _model_usage(100, 20000, 900000, 50000, cost(100, 20000, 900000, 50000, 0))}, False),
+            ({"claude-zeta-9": _model_usage(5, 3000, 4000000, 9000, cost(5, 3000, 4000000, 9000, 0))}, False),
+            ({"claude-zeta-9": _model_usage(50, 7000, 2000000, 80000, cost(50, 7000, 2000000, 30000, 50000))}, False),
+        )
+        self.assertEqual(learned["claude-zeta-9"]["input_cost_per_1m"], 7.0)
+
+
+class TestTranscriptAccuracy(unittest.TestCase):
+    """What real transcripts look like: repeated lines, resumed sessions, cache TTLs."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self._prev_config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+        os.environ["CLAUDE_CONFIG_DIR"] = self.temp_dir
+        self.config_data = load_config()
+
+    def tearDown(self):
+        if self._prev_config_dir is None:
+            os.environ.pop("CLAUDE_CONFIG_DIR", None)
+        else:
+            os.environ["CLAUDE_CONFIG_DIR"] = self._prev_config_dir
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _write(self, project, session_id, lines):
+        project_dir = os.path.join(self.temp_dir, "projects", project)
+        os.makedirs(project_dir, exist_ok=True)
+        with open(os.path.join(project_dir, f"{session_id}.jsonl"), "w") as f:
+            f.write("\n".join(lines) + "\n")
+
+    def test_one_message_split_over_several_lines_counts_once(self):
+        """Claude Code writes a line per content block, each repeating the usage."""
+        self._write("p", "s1", [
+            _raw_line("claude-opus-5", "msg_1", "req_1", 3, 10, 5000, 200, 200, tool_names=["Read"]),
+            _raw_line("claude-opus-5", "msg_1", "req_1", 3, 250, 5000, 200, 200, tool_names=["mcp__fs__read"]),
+            _raw_line("claude-opus-5", "msg_2", "req_2", 1, 40, 5200, 0, 0),
+        ])
+        s = session_monitor.get_all_sessions(self.config_data)[0]
+        self.assertEqual(s["main_requests"], 2)
+        self.assertEqual(s["output_tokens"], 290, "the later line's final output count, not a sum")
+        self.assertEqual(s["cache_read_tokens"], 10200)
+        group = session_monitor.find_session_groups()[0]
+        calls = session_monitor.build_mcp_call_log(group, self.config_data)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["tools"], ["mcp__fs__read"])
+
+    def test_lines_without_an_id_are_never_merged(self):
+        self._write("p", "s1", [_usage_line("claude-opus-5", 10, 10), _usage_line("claude-opus-5", 10, 10)])
+        self.assertEqual(session_monitor.get_all_sessions(self.config_data)[0]["main_requests"], 2)
+
+    def test_resumed_session_does_not_recount_the_copied_conversation(self):
+        shared = _raw_line("claude-opus-5", "msg_old", "req_old", 5, 1000, 0, 0, timestamp="2026-01-01T00:00:00.000Z")
+        self._write("p", "original", [shared])
+        self._write("p", "resumed", [shared, _raw_line("claude-opus-5", "msg_new", "req_new", 5, 50, 0, 0,
+                                                        timestamp="2026-01-02T00:00:00.000Z")])
+        sessions = {s["session_id"]: s for s in session_monitor.get_all_sessions(self.config_data)}
+        self.assertEqual(sessions["original"]["output_tokens"], 1000)
+        self.assertEqual(sessions["resumed"]["output_tokens"], 50)
+        summary = session_monitor.get_global_usage_summary(self.config_data)
+        self.assertEqual(summary["total_requests"], 2)
+        self.assertEqual(summary["usage_by_model"][0]["output"], 1050)
+        now = datetime(2026, 1, 3, tzinfo=timezone.utc)
+        self.assertEqual(session_monitor.get_rolling_window_usage(self.config_data, now=now)["7d"]["output"], 1050)
+
+    def test_session_cost_prices_one_hour_cache_writes_at_twice_input(self):
+        self._write("p", "s1", [_raw_line("claude-opus-5", "m", "r", 0, 0, 0, 1_000_000, 1_000_000)])
+        s = session_monitor.get_all_sessions(self.config_data)[0]
+        self.assertAlmostEqual(s["cost"], 2 * self.config_data["claude-opus-5"]["input_cost_per_1m"])
+
+    def test_a_brand_new_model_is_priced_as_an_estimate(self):
+        self._write("p", "s1", [_raw_line("claude-opus-5-6", "m", "r", 1000, 1000, 500000, 0, 0)])
+        s = session_monitor.get_all_sessions(self.config_data)[0]
+        self.assertIsNotNone(s["cost"])
+        self.assertTrue(s["cost_estimated"])
+        self.assertEqual(s["pricing"], {"claude-opus-5-6": "estimated"})
+        self.assertEqual(s["context_window"], self.config_data["claude-opus-5-5"]["context_window"])
+        row = session_monitor.get_global_usage_summary(self.config_data)["usage_by_model"][0]
+        self.assertEqual((row["pricing_source"], row["based_on"]), ("estimated", "claude-opus-5-5"))
+
+    def test_claude_codes_cost_records_teach_the_rate_of_an_unknown_model(self):
+        def cost(inp, out, read, write):
+            return 7 * (inp + 5 * out + 0.1 * read + 2 * write) / 1e6
+        self._write("p", "s1", [
+            _raw_line("claude-zeta-9", "m1", "r1", 0, 1_000_000, 0, 0, 0),
+            _cost_state({"claude-zeta-9": _model_usage(100, 20000, 900000, 50000, cost(100, 20000, 900000, 50000))}),
+        ])
+        self._write("p", "s2", [
+            _cost_state({"claude-zeta-9": _model_usage(5, 3000, 4000000, 9000, cost(5, 3000, 4000000, 9000))}),
+        ])
+        sessions = {s["session_id"]: s for s in session_monitor.get_all_sessions(self.config_data)}
+        self.assertEqual(sessions["s1"]["pricing"], {"claude-zeta-9": "learned"})
+        self.assertAlmostEqual(sessions["s1"]["cost"], 35.0)
+        self.assertFalse(sessions["s1"]["cost_estimated"])
+
+    def test_cost_state_records_keep_only_numbers(self):
+        self._write("p", "s1", [_cost_state({"claude-opus-5": _model_usage(1, 2, 3, 4, 0.5)})])
+        path = session_monitor.find_session_groups()[0]["main"]
+        record = list(session_monitor._iter_cost_states(path))[0]
+        self.assertEqual(set(record), {"modelUsage", "hasUnknownModelCost"})
+        self.assertNotIn("totalLinesAdded", json.dumps(record))
+
+    def test_malformed_ids_and_numbers_never_crash(self):
+        bad = [
+            json.dumps({"type": "assistant", "timestamp": "2026-01-01T00:00:00Z", "requestId": "r",
+                        "message": {"id": ["a"], "model": "claude-opus-5", "usage": {"input_tokens": 10}}}),
+            json.dumps({"type": "assistant", "timestamp": 12345, "requestId": {"x": 1},
+                        "message": {"id": "b", "model": ["claude"], "usage": {"input_tokens": -5,
+                                                                              "output_tokens": float("inf")}}}),
+            '{"type": "cost-state", "modelUsage": {"claude-nova-1": {"costUSD": Infinity, "inputTokens": 100000}}}',
+            '{"type": "cost-state", "modelUsage": {"claude-nova-1": {"costUSD": Infinity, "inputTokens": 200000}}}',
+            _raw_line("claude-nova-1", "c", "r3", 10, 10),
+        ]
+        self._write("p", "s1", bad)
+        sessions = session_monitor.get_all_sessions(self.config_data)
+        self.assertEqual(sessions[0]["main_requests"], 3)
+        self.assertEqual(sessions[0]["output_tokens"], 10, "an infinite count is dropped, not summed")
+        summary = session_monitor.get_global_usage_summary(self.config_data)
+        nova = [m for m in summary["usage_by_model"] if m["model"] == "claude-nova-1"][0]
+        self.assertIsNone(nova["cost"], "Infinity costUSD must not teach a rate")
+        session_monitor.get_rolling_window_usage(self.config_data)
+        session_monitor.get_session_breakdown("s1", self.config_data)
+        session_monitor.get_cleanup_candidates(self.config_data)
+
+    def _set_mtime(self, session_id, when):
+        path = os.path.join(self.temp_dir, "projects", "p", f"{session_id}.jsonl")
+        os.utime(path, (when, when))
+
+    def test_original_owns_copied_messages_even_when_timestamps_tie(self):
+        """A resumed file starts with copies at the SAME timestamps; the older file keeps them."""
+        shared = [_raw_line("claude-opus-5", f"m{i}", f"r{i}", 1, 100) for i in range(2)]
+        for original, resumed in (("aaa", "zzz"), ("zzz", "aaa")):
+            shutil.rmtree(os.path.join(self.temp_dir, "projects"), ignore_errors=True)
+            self._write("p", original, shared)
+            self._write("p", resumed, shared + [_raw_line("claude-opus-5", "new", "rn", 1, 7)])
+            self._set_mtime(original, time.time() - 30 * 86400)
+            sessions = {s["session_id"]: s for s in session_monitor.get_all_sessions(self.config_data)}
+            self.assertEqual(sessions[original]["main_requests"], 2, original)
+            self.assertEqual(sessions[resumed]["main_requests"], 1, resumed)
+
+    def test_a_session_made_only_of_copies_stays_listed_and_deletable(self):
+        shared = [_raw_line("claude-opus-5", "m1", "r1", 1, 100)]
+        self._write("p", "original", shared)
+        self._write("p", "resumed", shared)
+        self._set_mtime("original", time.time() - 40 * 86400)
+        self._set_mtime("resumed", time.time() - 30 * 86400)
+        sessions = {s["session_id"]: s for s in session_monitor.get_all_sessions(self.config_data)}
+        self.assertTrue(sessions["resumed"]["copied_only"])
+        self.assertEqual(sessions["resumed"]["output_tokens"], 0)
+        self.assertEqual(session_monitor.get_global_usage_summary(self.config_data)["total_requests"], 1)
+        candidates = {c["session_id"] for c in session_monitor.get_cleanup_candidates(self.config_data)}
+        self.assertEqual(candidates, {"original", "resumed"})
+
+    def test_session_breakdown_agrees_with_the_live_monitor(self):
+        shared = _raw_line("claude-opus-5", "m1", "r1", 1, 100, tool_names=["mcp__fs__read"])
+        self._write("p", "original", [shared])
+        self._write("p", "resumed", [shared, _raw_line("claude-opus-5", "m2", "r2", 1, 5)])
+        self._set_mtime("original", time.time() - 3600)
+        summary, _subagents, mcp_calls = session_monitor.get_session_breakdown("resumed", self.config_data)
+        live = {s["session_id"]: s for s in session_monitor.get_all_sessions(self.config_data)}["resumed"]
+        self.assertEqual(summary["main_requests"], live["main_requests"])
+        self.assertEqual(summary["cost"], live["cost"])
+        self.assertEqual(mcp_calls, [], "the MCP turn belongs to the original session")
+
+    def test_estimated_cost_is_marked_in_the_views(self):
+        self.assertEqual(tui._fmt_cost(12.3, compact=True, estimated=True), "~$12.30")
+        self.assertEqual(floating._fmt_cost(12.3, estimated=True), "~$12.30")
+        note = tui._pricing_note([{"model": "claude-opus-5-6", "pricing_source": "estimated",
+                                   "based_on": "claude-opus-5-5", "cost": 1.0}])
+        self.assertIn("estimated from claude-opus-5-5", note)
+        self.assertIsNone(tui._pricing_note([{"model": "claude-opus-5", "pricing_source": "configured", "cost": 1.0}]))
 
 
 class TestClaudeConfig(unittest.TestCase):

@@ -76,13 +76,17 @@ def _fmt_tokens(n):
     return str(n)
 
 
-def _fmt_cost(cost):
-    """Cost for a narrow column; never renders a real cost as a flat $0.00."""
+def _fmt_cost(cost, estimated=False):
+    """
+    Cost for a narrow column; never renders a real cost as a flat $0.00.
+    `estimated` prefixes "~" (a model priced from a sibling's rates).
+    """
     if cost is None:
         return "N/A"
     if cost == 0:
         return "free"
-    return f"${cost:,.2f}" if cost >= 0.01 else "<$0.01"
+    mark = "~" if estimated else ""
+    return f"{mark}${cost:,.2f}" if cost >= 0.01 else f"{mark}<$0.01"
 
 
 def _context_color(percent):
@@ -240,7 +244,7 @@ def _plan_headline(config_data, sessions=None):
         if sessions is None:
             sessions = session_monitor.get_all_sessions(config_data)
         total = sum(s["cost"] for s in sessions if s["cost"] is not None)
-        return _fmt_cost(total), ACCENT
+        return _fmt_cost(total, estimated=any(s.get("cost_estimated") for s in sessions)), ACCENT
     except Exception:
         return "", DIM
 
@@ -517,7 +521,7 @@ def run_floating_monitor(config_data, max_rows=5, show_chat_title=False):
             tk.Label(row, text=_fmt_tokens(s["input_tokens"] + s["output_tokens"]),
                      bg=BG, fg=DIM, font=("monospace", 8), anchor="e",
                      width=7).pack(side="left")
-            tk.Label(row, text=_fmt_cost(s["cost"]), bg=BG, fg=ACCENT,
+            tk.Label(row, text=_fmt_cost(s["cost"], estimated=s.get("cost_estimated")), bg=BG, fg=ACCENT,
                      font=("monospace", 8), anchor="e", width=9).pack(side="left")
             tk.Label(row, text="-" if pct is None else f"{pct:.0f}%", bg=BG,
                      fg=_context_color(pct), font=("monospace", 8), anchor="e",
