@@ -345,6 +345,49 @@ class TestSessionMonitor(unittest.TestCase):
         self.assertEqual(preview["first_prompt"], "the opening prompt")
         self.assertEqual(preview["messages"], [("user", "last question")])
 
+    def test_cleanup_lists_sessions_with_no_model_call(self):
+        self._write_session("proj-empty", "session-empty", [
+            json.dumps({"type": "user", "message": {"content": "<command-name>/clear</command-name>"}}),
+        ])
+        [c] = session_monitor.get_cleanup_candidates(
+            self.config_data, now=session_monitor.time.time() + 10, threshold_seconds=0
+        )
+        self.assertEqual((c["session_id"], c["origin"], c["input_tokens"], c["cost"]),
+                         ("session-empty", "claude", 0, None))
+        self.assertTrue(c["is_live"])
+        self.assertEqual(session_monitor.delete_session(c), (True, None))
+        self.assertFalse(c["main_path"].exists())
+
+    def test_cleanup_keeps_sessions_newer_than_now_and_labels_empty_ones_by_cwd(self):
+        self._write_session("-home-me-proj", "session-empty", [
+            json.dumps({"type": "user", "cwd": "/home/me/proj", "message": {"content": "<command-name>/clear</command-name>"}}),
+        ])
+        [c] = session_monitor.get_cleanup_candidates(
+            self.config_data, now=session_monitor.time.time() - 60, threshold_seconds=0
+        )
+        self.assertEqual((c["age_seconds"], c["is_live"], c["cwd"]), (0.0, True, "/home/me/proj"))
+
+    def test_cleanup_table_renders_markup_safely_at_every_width(self):
+        from tokens_counter import tui
+        candidates = [
+            {"session_id": "abc12345-x", "project": "foo[/]", "cwd": None, "origin": "claude",
+             "models": ["[bold]m"], "input_tokens": 1, "output_tokens": 2, "cost": None,
+             "age_seconds": 90000, "is_live": False},
+            {"session_id": "ses_0001ollamaABCDEFGH", "project": "p", "cwd": None, "origin": "opencode",
+             "models": [], "input_tokens": 0, "output_tokens": 0, "cost": 0.0,
+             "age_seconds": 10, "is_live": True},
+        ]
+        original = tui.console
+        try:
+            for width in (40, 70, 120):
+                tui.console = tui.Console(width=width, record=True, file=io.StringIO())
+                tui.render_cleanup_candidates(candidates)
+                text = tui.console.export_text()
+                self.assertIn("foo[/]", text)
+                self.assertIn("…ABCDEFGH", text)
+        finally:
+            tui.console = original
+
     def test_delete_session_handles_missing_file_without_raising(self):
         self._write_session("proj-gone", "session-gone", [_usage_line("claude-3-5-sonnet", 100, 50)])
         candidates = session_monitor.get_cleanup_candidates(
@@ -1947,14 +1990,14 @@ class TestOpenCodeSessions(unittest.TestCase):
         con.execute("create table session (id text, parent_id text, directory text, "
                     "time_updated integer, title text)")
         con.execute("create table message (id text, session_id text, data text)")
-        con.execute("create table part (id text, session_id text, data text)")
+        con.execute("create table part (id text, session_id text, data text, message_id text)")
         for sid, parent, directory, minutes_ago in sessions:
             con.execute("insert into session values (?,?,?,?,?)",
                         (sid, parent, directory, int((self.now - minutes_ago * 60) * 1000),
                          "private title"))
         for i, (sid, data) in enumerate(messages):
             con.execute("insert into message values (?,?,?)", (f"m{i}", sid, json.dumps(data)))
-        con.execute("insert into part values ('p1', 's1', '{\"text\": \"PRIVATE PROMPT\"}')")
+        con.execute("insert into part (id, session_id, data) values ('p1', 's1', '{\"text\": \"PRIVATE PROMPT\"}')")
         con.commit()
         con.close()
 
@@ -1979,6 +2022,183 @@ class TestOpenCodeSessions(unittest.TestCase):
         self.assertEqual((s["project"], s["origin"]), ("api", "opencode"))
         self.assertTrue(s["is_active"])
         self.assertNotIn("PRIVATE", repr(s))
+
+    def _conversation_db(self):
+        import sqlite3
+        self._build([("ses_abc", None, "/home/me/projects/api", 60)],
+                    [("ses_abc", self._reply("openrouter", "qwen/qwen3-4b:free", 10, 5, minutes_ago=60))])
+        con = sqlite3.connect(self.db)
+        con.execute("update session set title = 'Fix the API'")
+        msgs = [("mu1", "user", 1), ("ma1", "assistant", 2), ("mu2", "user", 3), ("ma2", "assistant", 4)]
+        for mid, role, t in msgs:
+            con.execute("insert into message values (?,?,?)",
+                        (mid, "ses_abc", json.dumps({"role": role, "time": {"created": t}})))
+        parts = [("mu2", {"type": "text", "text": "second question"}),
+                 ("mu1", {"type": "text", "text": "first question"}),
+                 ("mu1", {"type": "text", "text": "SYNTHETIC", "synthetic": True}),
+                 ("ma1", {"type": "reasoning", "text": "THINKING"}),
+                 ("ma1", {"type": "tool", "tool": "bash", "state": {"input": "SECRET"}}),
+                 ("ma1", {"type": "text", "text": "first answer"}),
+                 ("ma2", {"type": "text", "text": "second answer"})]
+        for i, (mid, data) in enumerate(parts):
+            con.execute("insert into part (id, session_id, data, message_id) values (?,?,?,?)",
+                        (f"pp{i}", "ses_abc", json.dumps(data), mid))
+        con.commit()
+        con.close()
+
+    def test_read_opencode_conversation_keeps_only_text_in_order(self):
+        self._conversation_db()
+        title, conversation = self.oc.read_opencode_conversation("ses_abc", self.db)
+        self.assertEqual(title, "Fix the API")
+        self.assertEqual(conversation, [("user", "first question"), ("assistant", "first answer"),
+                                        ("user", "second question"), ("assistant", "second answer")])
+        self.assertEqual(self.oc.read_opencode_conversation("ses_abc", os.path.join(self.tmp, "none.db")),
+                         (None, []))
+
+    def test_cleanup_lists_and_previews_opencode_sessions(self):
+        self._conversation_db()
+        self.addCleanup(_restore_env, "XDG_DATA_HOME", os.environ.get("XDG_DATA_HOME"))
+        os.environ["XDG_DATA_HOME"] = os.path.join(self.tmp, "data")
+        os.makedirs(os.path.join(self.tmp, "data", "opencode"))
+        shutil.copy(self.db, self.oc.opencode_db_path())
+        [c] = session_monitor.get_cleanup_candidates({}, now=self.now, threshold_seconds=0)
+        self.assertEqual((c["origin"], c["session_id"], c["is_live"]), ("opencode", "ses_abc", False))
+        self.assertEqual(c["models"], ["openrouter/qwen/qwen3-4b:free"])
+        preview = session_monitor.get_session_preview(c, last_messages=2)
+        self.assertEqual(preview["title"], "Fix the API")
+        self.assertEqual(preview["first_prompt"], "first question")
+        self.assertEqual(preview["messages"], [("user", "second question"), ("assistant", "second answer")])
+        self.assertNotIn("SECRET", repr(preview))
+        self.assertNotIn("THINKING", repr(preview))
+
+    def test_sessions_without_a_reply_are_only_listed_for_cleanup(self):
+        self._build([("ses_empty", None, "/home/me/projects/api", 120), ("ses_ok", None, "/home/me/projects/api", 1)],
+                    [("ses_empty", {"role": "user", "time": {"created": 1}}),
+                     ("ses_ok", self._reply("ollama", "qwen3.5:0.8b", 10, 5))])
+        self.assertEqual([s["session_id"] for s in self.oc.get_opencode_sessions(self.db, now=self.now)], ["ses_ok"])
+        everything = self.oc.get_opencode_sessions(self.db, now=self.now, include_empty=True)
+        empty = next(s for s in everything if s["session_id"] == "ses_empty")
+        self.assertEqual((empty["main_requests"], empty["cost"], empty["last_request"]), (0, None, None))
+        self.assertEqual(self.oc.get_opencode_usage(self.db)["session_count"], 1)
+
+    def test_conversation_falls_back_to_the_message_row_time(self):
+        import sqlite3
+        con = sqlite3.connect(self.db)
+        con.execute("create table session (id text, title text)")
+        con.execute("create table message (id text, session_id text, time_created integer, data text)")
+        con.execute("create table part (id text, message_id text, session_id text, data text)")
+        con.execute("insert into session values ('ses_t', 'T')")
+        con.execute("insert into message values ('m2', 'ses_t', 2, ?)", (json.dumps({"role": "assistant"}),))
+        con.execute("insert into message values ('m1', 'ses_t', 1, ?)", (json.dumps({"role": "user"}),))
+        for pid, mid, text in (("p1", "m2", "answer"), ("p2", "m1", "question")):
+            con.execute("insert into part values (?,?,?,?)",
+                        (pid, mid, "ses_t", json.dumps({"type": "text", "text": text})))
+        con.commit()
+        con.close()
+        self.assertEqual(self.oc.read_opencode_conversation("ses_t", self.db),
+                         ("T", [("user", "question"), ("assistant", "answer")]))
+
+    def _build_v2(self):
+        """The layout OpenCode 2.0.16 really writes (captured from a run against a local mock model)."""
+        import sqlite3
+        con = sqlite3.connect(self.db)
+        con.execute("create table session_v2 (id text, parent_id text, directory text, title text, "
+                    "time_updated integer, model text)")
+        con.execute("create table session_message (id text, session_id text, type text, seq integer, "
+                    "time_created integer, data text)")
+        stamp = int((self.now - 3600) * 1000)
+        con.execute("insert into session_v2 values ('ses_v2root', null, '/home/me/projects/web', 'Fix the web', ?, "
+                    "'{\"id\":\"mock-model\",\"providerID\":\"mock\"}')", (stamp,))
+        con.execute("insert into session_v2 values ('ses_v2child', 'ses_v2root', '/home/me/projects/web', 'sub', ?, null)",
+                    (stamp,))
+        rows = [
+            ("ses_v2root", "user", 4, {"time": {"created": stamp}, "text": "first question", "files": []}),
+            ("ses_v2root", "assistant", 7, {
+                "time": {"created": stamp, "completed": stamp}, "agent": "build",
+                "model": {"id": "mock-model", "providerID": "mock", "variant": "default"},
+                "content": [{"type": "reasoning", "text": "THINKING"},
+                            {"type": "tool", "name": "bash", "input": {"command": "SECRET"}},
+                            {"type": "text", "text": "first answer"}],
+                "finish": "stop", "cost": 0.25,
+                "tokens": {"input": 1234, "output": 56, "reasoning": 4, "cache": {"read": 10, "write": 0}}}),
+            ("ses_v2root", "idle", 12, {"time": {"created": stamp}, "outcome": "succeeded"}),
+            ("ses_v2root", "user", 13, {"time": {"created": stamp}, "text": "SYNTHETIC", "synthetic": True}),
+            ("ses_v2child", "assistant", 2, {
+                "time": {"created": stamp}, "model": {"id": "qwen3.5:0.8b", "providerID": "ollama"},
+                "content": [{"type": "text", "text": "child answer"}], "cost": 0,
+                "tokens": {"input": 100, "output": 10, "reasoning": 0, "cache": {"read": 0, "write": 0}}}),
+        ]
+        for i, (sid, kind, seq, data) in enumerate(rows):
+            con.execute("insert into session_message values (?,?,?,?,?,?)",
+                        (f"msg{i}", sid, kind, seq, stamp, json.dumps(data)))
+        con.commit()
+        con.close()
+
+    def test_reads_opencode_2x_sessions(self):
+        self._build_v2()
+        [s] = self.oc.get_opencode_sessions(self.db, now=self.now)
+        self.assertEqual((s["session_id"], s["project"], s["subagent_count"]), ("ses_v2root", "web", 1))
+        self.assertEqual((s["input_tokens"], s["output_tokens"], s["cache_read_tokens"]), (1334, 70, 10))
+        self.assertEqual(s["models"], ["mock/mock-model", "ollama/qwen3.5:0.8b"])
+        self.assertAlmostEqual(s["cost"], 0.25)
+        self.assertEqual(self.oc.get_opencode_usage(self.db)["requests"], 2)
+
+    def test_reads_opencode_2x_conversation_text_only(self):
+        self._build_v2()
+        title, conversation = self.oc.read_opencode_conversation("ses_v2root", self.db)
+        self.assertEqual(title, "Fix the web")
+        self.assertEqual(conversation, [("user", "first question"), ("assistant", "first answer")])
+        self.assertNotIn("SECRET", repr(conversation))
+        self.assertNotIn("THINKING", repr(conversation))
+
+    def test_delete_opencode_session_uses_opencodes_own_command(self):
+        import subprocess
+        from unittest import mock
+        calls = []
+
+        def fake_run(args, **kw):
+            calls.append(args)
+            return subprocess.CompletedProcess(args, 0, "Session ses_abc deleted\n", "")
+        with mock.patch.object(self.oc.shutil, "which", return_value="/usr/bin/opencode"), \
+                mock.patch.object(self.oc.subprocess, "run", side_effect=fake_run):
+            self.assertEqual(session_monitor.delete_session({"origin": "opencode", "session_id": "ses_abc"}),
+                             (True, None))
+        self.assertEqual(calls, [["/usr/bin/opencode", "session", "delete", "--standalone", "ses_abc"]])
+
+    def test_delete_opencode_session_retries_without_standalone_on_opencode_1x(self):
+        import subprocess
+        from unittest import mock
+        calls = []
+
+        def fake_run(args, **kw):
+            calls.append(args)
+            if "--standalone" in args:
+                # What OpenCode 1.18 really prints: just the usage, exit 1.
+                return subprocess.CompletedProcess(args, 1, "", "opencode session delete <sessionID>\n\n"
+                                                   "delete a session\n\nPositionals:\n\nOptions:\n")
+            return subprocess.CompletedProcess(args, 0, "", "")
+        with mock.patch.object(self.oc.shutil, "which", return_value="opencode.cmd"), \
+                mock.patch.object(self.oc.subprocess, "run", side_effect=fake_run):
+            self.assertEqual(self.oc.delete_opencode_session("ses_abc"), (True, None))
+        self.assertEqual(calls, [["opencode.cmd", "session", "delete", "--standalone", "ses_abc"],
+                                 ["opencode.cmd", "session", "delete", "ses_abc"]])
+
+    def test_delete_opencode_session_reports_failures_without_raising(self):
+        import subprocess
+        from unittest import mock
+        with mock.patch.object(self.oc.subprocess, "run") as run:
+            self.assertFalse(self.oc.delete_opencode_session("ses_x; rm -rf ~")[0])
+            self.assertFalse(self.oc.delete_opencode_session("../ses_x")[0])
+            self.assertFalse(self.oc.delete_opencode_session("ses_abc\n")[0])
+            with mock.patch.object(self.oc.shutil, "which", return_value=None):
+                ok, error = self.oc.delete_opencode_session("ses_abc")
+            self.assertFalse(ok)
+            self.assertIn("not found", error)
+            run.assert_not_called()
+        failed = subprocess.CompletedProcess([], 1, "", "\x1b[91mError: \x1b[0mSession not found: ses_abc\n    at x\n")
+        with mock.patch.object(self.oc.shutil, "which", return_value="/usr/bin/opencode"), \
+                mock.patch.object(self.oc.subprocess, "run", return_value=failed):
+            self.assertEqual(self.oc.delete_opencode_session("ses_abc"), (False, "Session not found: ses_abc"))
 
     def _catalog(self, catalog=None, config=None):
         """Point OpenCode's cache/config dirs at this test's temp dir."""

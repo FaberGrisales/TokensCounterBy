@@ -812,40 +812,90 @@ def render_global_usage_live_view(status, rolling_usage, data, plan_limits=None,
     renderables.append("[dim]Refreshing every few seconds · Press Ctrl+C to stop and return to the menu[/]")
     return Group(*renderables)
 
+def _models_label(models):
+    """A session's first listed model, plus how many others it used."""
+    if not models:
+        return "[dim]-[/]"
+    extra = f" [dim]+{len(models) - 1}[/]" if len(models) > 1 else ""
+    return f"{escape(models[0])}{extra}"
+
+def _short_session_id(session):
+    """The distinguishing end of a session id: OpenCode ids share a time-ordered prefix."""
+    session_id = session["session_id"]
+    if session.get("origin") == "opencode":
+        return f"…{session_id[-8:]}"
+    return f"{session_id[:8]}…"
+
+def _short_age(seconds):
+    """'30d', '5h', '12m', '40s' - for the narrow cleanup layouts."""
+    seconds = int(max(0, seconds))
+    for unit, size in (("d", 86400), ("h", 3600), ("m", 60)):
+        if seconds >= size:
+            return f"{seconds // size}{unit}"
+    return f"{seconds}s"
+
 def render_cleanup_candidates(candidates):
     """
-    Prints a numbered table of sessions inactive long enough to be cleanup
-    candidates (see session_monitor.get_cleanup_candidates()), most inactive
-    first. main.py uses the printed row numbers to build its interactive
-    picker; this function only renders the list, it never deletes anything.
+    Prints a numbered table of cleanup candidates (see
+    session_monitor.get_cleanup_candidates()) from every tool - Claude Code
+    and OpenCode - most inactive first. main.py uses the printed row numbers
+    to build its interactive picker; this function only renders the list, it
+    never deletes anything. Responsive like Option 1: the full table at
+    COMPACT_WIDTH and up, a 5-column table down to NARROW_WIDTH, and a
+    two-line-per-session list below that.
     """
+    width = console.width
+    if width < NARROW_WIDTH:
+        console.print("[bold red]Local Sessions (cleanup candidates)[/]")
+        for i, c in enumerate(candidates, start=1):
+            project_label = os.path.basename(c["cwd"]) if c.get("cwd") else c["project"]
+            live = " [bold red]LIVE[/]" if c["is_live"] else ""
+            console.print(f"[bold yellow]{i:>2}[/] {_tool_label(c, short=True)} [bold green]{escape(project_label)}[/]{live}")
+            console.print(f"   [dim]{escape(_short_session_id(c))}[/]  {_short_age(c['age_seconds'])} ago  "
+                          f"{_fmt_tokens(c['input_tokens'])}/{_fmt_tokens(c['output_tokens'])}  "
+                          f"{_fmt_cost(c['cost'], compact=True, estimated=c.get('cost_estimated'))}")
+        console.print(TOOL_LEGEND)
+        console.print()
+        return
+
+    full = width >= COMPACT_WIDTH
     table = Table(box=box.ROUNDED, border_style="red", title="[bold red]Local Sessions (cleanup candidates)[/]")
     table.add_column("#", justify="right", style="bold yellow")
-    table.add_column("Project / Session", style="bold green")
-    table.add_column("Last Activity", justify="right")
-    table.add_column("Tokens (In/Out)", justify="right")
+    table.add_column("Tool")
+    table.add_column("Project / Session", style="bold green", overflow="fold")
+    if full:
+        table.add_column("Model(s)", overflow="fold")
+    table.add_column("Last Activity" if full else "Idle", justify="right")
+    if full:
+        table.add_column("Tokens (In/Out)", justify="right")
     table.add_column("Cost", justify="right")
 
     for i, c in enumerate(candidates, start=1):
         project_label = os.path.basename(c["cwd"]) if c.get("cwd") else c["project"]
         live = " [bold red]LIVE[/]" if c["is_live"] else ""
-        session_label = f"{project_label}{live}\n[dim]{c['session_id'][:8]}…[/]"
-        cost_str = _fmt_cost(c["cost"], estimated=c.get("cost_estimated"))
-        table.add_row(
-            str(i),
-            session_label,
-            f"{_format_duration(c['age_seconds'])} ago",
-            f"{c['input_tokens']:,} / {c['output_tokens']:,}",
-            cost_str
-        )
+        session_label = f"{escape(project_label)}{live}\n[dim]{escape(_short_session_id(c))}[/]"
+        cost_str = _fmt_cost(c["cost"], compact=not full, estimated=c.get("cost_estimated"))
+        if full:
+            table.add_row(
+                str(i), _tool_label(c), session_label, _models_label(c.get("models")),
+                f"{_format_duration(c['age_seconds'])} ago",
+                f"{_fmt_tokens(c['input_tokens'])} / {_fmt_tokens(c['output_tokens'])}",
+                cost_str,
+            )
+        else:
+            table.add_row(str(i), _tool_label(c, short=True), session_label,
+                          _short_age(c["age_seconds"]), cost_str)
 
     console.print(table, justify="center")
+    if not full:
+        console.print(TOOL_LEGEND, justify="center")
     console.print()
 
 def render_session_preview(candidate, preview):
     """Prints one cleanup candidate's title, first prompt and last messages (see session_monitor.get_session_preview())."""
     project_label = os.path.basename(candidate["cwd"]) if candidate.get("cwd") else candidate["project"]
-    labels = {"user": "[bold cyan]You:[/]", "assistant": "[bold #d97757]Claude:[/]"}
+    assistant = f"[bold {OPENCODE_STYLE}]OpenCode:[/]" if candidate.get("origin") == "opencode" else f"[bold {CLAUDE_STYLE}]Claude:[/]"
+    labels = {"user": "[bold cyan]You:[/]", "assistant": assistant}
     body = []
     if preview.get("title"):
         body.append(f"[bold]{escape(preview['title'])}[/]")
@@ -858,7 +908,8 @@ def render_session_preview(candidate, preview):
         body.append("[dim]No text found in this session.[/]")
     console.print(Panel(
         "\n\n".join(body),
-        title=f"Preview · {project_label} [dim]{candidate['session_id'][:8]}…[/] · {_format_duration(candidate['age_seconds'])} ago",
+        title=(f"Preview · {_tool_label(candidate)} · {escape(project_label)} "
+               f"[dim]{escape(_short_session_id(candidate))}[/] · {_format_duration(candidate['age_seconds'])} ago"),
         border_style="yellow",
     ))
     console.print()

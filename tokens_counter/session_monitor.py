@@ -716,15 +716,19 @@ def _all_sessions_with_book(config_data, now=None):
     return summaries, book
 
 
-def get_cleanup_candidates(config_data, now=None, threshold_seconds=CLEANUP_INACTIVE_THRESHOLD_SECONDS):
+def get_cleanup_candidates(config_data, now=None, threshold_seconds=CLEANUP_INACTIVE_THRESHOLD_SECONDS,
+                           include_opencode=True):
     """
     Returns sessions that have been inactive for at least `threshold_seconds`
-    (default CLEANUP_INACTIVE_THRESHOLD_SECONDS, 7 days), most-inactive
-    first, for main.py's Option 5 cleanup picker. Each candidate is a normal
-    build_session_summary() dict plus `age_seconds` and the actual
-    `main_path`/`subagent_paths` delete_session() needs to remove it - kept
-    on the same dict so the picker never has to re-look-up a session by ID
-    between listing it and deleting it.
+    (default CLEANUP_INACTIVE_THRESHOLD_SECONDS, 7 days; Option 5 passes 0 to
+    list every session), most-inactive first, for main.py's Option 5 cleanup
+    picker. Claude Code candidates are build_session_summary() dicts plus
+    `age_seconds`, `is_live` and the actual `main_path`/`subagent_paths`
+    delete_session() needs to remove them - kept on the same dict so the
+    picker never has to re-look-up a session by ID between listing it and
+    deleting it. A transcript with no model call at all (opened and left, or
+    only local commands) is still listed, with zero usage. OpenCode sessions
+    (any provider/model) are included too, tagged `origin: "opencode"`.
     """
     now = time.time() if now is None else now
     candidates = []
@@ -735,19 +739,61 @@ def get_cleanup_candidates(config_data, now=None, threshold_seconds=CLEANUP_INAC
         summaries = [(group, _summarize(group, config_data, now, book, owned)) for group in groups]
     for group, summary in summaries:
         if summary is None:
-            continue
-        age_seconds = now - summary["mtime"]
-        if age_seconds < threshold_seconds:
-            continue
+            summary = _empty_summary(group)
+            if summary is None:
+                continue
         candidates.append({
             **summary,
-            "age_seconds": age_seconds,
-            "is_live": age_seconds < ACTIVE_THRESHOLD_SECONDS,
+            "origin": "claude",
             "main_path": group["main"],
             "subagent_paths": group["subagents"],
         })
-    candidates.sort(key=lambda c: c["mtime"])
-    return candidates
+    if include_opencode:
+        from tokens_counter.opencode_sessions import get_opencode_sessions
+        candidates += get_opencode_sessions(now=now, include_empty=True)
+    result = []
+    for c in candidates:
+        # A session written during the scan (or a clock skew) can look newer
+        # than `now`; it's live, not something to drop from the list.
+        age_seconds = max(0.0, now - c["mtime"])
+        if age_seconds >= threshold_seconds:
+            result.append({**c, "age_seconds": age_seconds, "is_live": age_seconds < ACTIVE_THRESHOLD_SECONDS})
+    result.sort(key=lambda c: c["mtime"])
+    return result
+
+
+def _first_cwd(path, max_lines=50):
+    """The `cwd` metadata field of the first transcript lines that carry one, or None."""
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            for _ in range(max_lines):
+                line = f.readline()
+                if not line:
+                    break
+                try:
+                    entry = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(entry, dict) and isinstance(entry.get("cwd"), str) and entry["cwd"]:
+                    return entry["cwd"]
+    except OSError:
+        pass
+    return None
+
+
+def _empty_summary(group):
+    """A zero-usage summary for a transcript with no model call, so cleanup can still list it."""
+    try:
+        mtime = max(p.stat().st_mtime for p in [group["main"]] + group["subagents"])
+    except OSError:
+        return None
+    return {
+        "session_id": group["main"].stem, "project": group["main"].parent.name,
+        "cwd": _first_cwd(group["main"]),
+        "models": [], "by_model": {}, "main_requests": 0, "subagent_requests": 0,
+        "subagent_count": len(group["subagents"]), "input_tokens": 0, "output_tokens": 0,
+        "cache_read_tokens": 0, "cache_write_tokens": 0, "cost": None, "mtime": mtime,
+    }
 
 
 PREVIEW_READ_BYTES = 2 * 1024 * 1024
@@ -785,51 +831,65 @@ def _preview_entries(lines, max_chars):
         text = _message_text(entry.get("message"))
         if not text or text.startswith(_PREVIEW_SKIP_PREFIXES):
             continue
-        yield kind, text if len(text) <= max_chars else text[:max_chars].rstrip() + "…"
+        yield kind, _truncate(text, max_chars)
+
+
+def _truncate(text, max_chars):
+    return text if len(text) <= max_chars else text[:max_chars].rstrip() + "…"
 
 
 def get_session_preview(candidate, max_chars=PREVIEW_MAX_CHARS, last_messages=PREVIEW_LAST_MESSAGES):
     """
     Returns {"title", "first_prompt", "messages"} for one session, like the
-    preview Claude Code shows when resuming it: the title Claude Code itself
-    generated (its `ai-title` entries), the user message that started the
-    session, and the last `last_messages` user/assistant messages as
-    (role, text) pairs, oldest first, each truncated to `max_chars`.
+    preview Claude Code shows when resuming it: the session's title, the user
+    message that started it, and the last `last_messages` user/assistant
+    messages as (role, text) pairs, oldest first, each truncated to
+    `max_chars`. For Claude Code the title is its own `ai-title`; for
+    OpenCode it's the session's title column (see
+    opencode_sessions.read_opencode_conversation()).
 
-    This is the ONE place the app reads message text from a transcript, and
-    it only runs when the user explicitly asks to preview a session in
-    Option 5's picker, so they can tell which session they're about to
-    delete. Only the head and tail of the file are read; tool_use inputs and
+    This is the ONE place the app reads message text, and it only runs when
+    the user explicitly asks to preview a session in Option 5's picker, so
+    they can tell which session they're about to delete. For Claude Code only
+    the head and tail of the transcript are read; tool_use inputs and
     tool_result content are never touched.
     """
     result = {"title": None, "first_prompt": None, "messages": []}
-    try:
-        with open(candidate["main_path"], "rb") as f:
-            head = f.read(PREVIEW_READ_BYTES)
-            f.seek(0, os.SEEK_END)
-            size = f.tell()
-            if size > PREVIEW_READ_BYTES:
-                f.seek(size - PREVIEW_READ_BYTES)
-                tail = f.read().split(b"\n")[1:]  # first line is cut mid-record
-                head = head.split(b"\n")[:-1]     # last line is cut mid-record
+    if candidate.get("origin") == "opencode":
+        from tokens_counter.opencode_sessions import read_opencode_conversation
+        title, conversation = read_opencode_conversation(candidate["session_id"])
+        result["title"] = title
+        first_user = next((text for role, text in conversation if role == "user"), None)
+        result["first_prompt"] = _truncate(first_user, max_chars) if first_user else None
+        messages = [(role, _truncate(text, max_chars)) for role, text in conversation]
+    else:
+        try:
+            with open(candidate["main_path"], "rb") as f:
+                head = f.read(PREVIEW_READ_BYTES)
+                f.seek(0, os.SEEK_END)
+                size = f.tell()
+                if size > PREVIEW_READ_BYTES:
+                    f.seek(size - PREVIEW_READ_BYTES)
+                    tail = f.read().split(b"\n")[1:]  # first line is cut mid-record
+                    head = head.split(b"\n")[:-1]     # last line is cut mid-record
+                else:
+                    head = tail = head.split(b"\n")
+        except OSError:
+            return result
+
+        for kind, text in _preview_entries(head, max_chars):
+            if kind == "title":
+                result["title"] = result["title"] or text
+            elif kind == "user":
+                result["first_prompt"] = text
+                break
+
+        messages = []
+        for kind, text in _preview_entries(tail, max_chars):
+            if kind == "title":
+                result["title"] = text  # the newest title wins, as in Claude Code
             else:
-                head = tail = head.split(b"\n")
-    except OSError:
-        return result
-
-    for kind, text in _preview_entries(head, max_chars):
-        if kind == "title":
-            result["title"] = result["title"] or text
-        elif kind == "user":
-            result["first_prompt"] = text
-            break
-
-    messages = []
-    for kind, text in _preview_entries(tail, max_chars):
-        if kind == "title":
-            result["title"] = text  # the newest title wins, as in Claude Code
-        else:
-            messages.append((kind, text))
+                messages.append((kind, text))
     result["messages"] = messages[-last_messages:] if last_messages else []
     if result["messages"] and result["messages"][0] == ("user", result["first_prompt"]):
         result["first_prompt"] = None  # short session: already shown below
@@ -843,8 +903,13 @@ def delete_session(candidate):
     irreversible deletion of Claude Code's own local history files - not
     reversible by this app, and not something Claude Code itself exposes a
     command for. Only ever call this after explicit user confirmation.
+    An OpenCode candidate is handed to OpenCode's own delete command instead
+    (opencode_sessions.delete_opencode_session()).
     Returns (success: bool, error_message: str or None).
     """
+    if candidate.get("origin") == "opencode":
+        from tokens_counter.opencode_sessions import delete_opencode_session
+        return delete_opencode_session(candidate["session_id"])
     main_path = candidate["main_path"]
     session_dir = main_path.parent / main_path.stem
     try:
@@ -1096,9 +1161,9 @@ def apply_budgets(rolling_usage, budget):
 def get_live_sessions(config_data, now=None):
     """
     Claude Code sessions plus OpenCode's, most recently active first - for
-    the live views (Option 1, floating window). The rest of the app (Session
-    Breakdown, Cleanup, usage windows) stays Claude Code only: OpenCode
-    sessions have no transcript files to break down or delete.
+    the live views (Option 1, floating window). Cleanup lists them too (see
+    get_cleanup_candidates()); Session Breakdown and the usage windows stay
+    Claude Code only, since OpenCode sessions have no transcripts to break down.
     """
     from tokens_counter.opencode_sessions import get_opencode_sessions
     sessions = get_all_sessions(config_data, now=now) + get_opencode_sessions(now=now)

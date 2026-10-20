@@ -147,7 +147,7 @@ def main():
             # specific sessions, and typing "DELETE" to confirm.
             tui.clear_screen()
             tui.console.print("[bold red]=== CLEANUP SESSIONS ===[/]\n")
-            tui.console.print("[dim]Scanning local sessions under ~/.claude/projects ...[/]\n")
+            tui.console.print("[dim]Scanning local Claude Code and OpenCode sessions ...[/]\n")
 
             candidates = session_monitor.get_cleanup_candidates(config_data, threshold_seconds=0)
             if not candidates:
@@ -157,8 +157,9 @@ def main():
 
             tui.render_cleanup_candidates(candidates)
             tui.console.print(
-                "[yellow]Deleting a session permanently removes its local transcript file(s) - "
-                "this cannot be undone, and Claude Code has no way to recover it.[/]\n"
+                "[yellow]Deleting a session permanently removes it - this cannot be undone. "
+                "Claude Code sessions are deleted as transcript files; OpenCode sessions "
+                "(and their subagent sessions) through OpenCode's own `opencode session delete`.[/]\n"
             )
 
             while True:
@@ -200,7 +201,7 @@ def main():
             for c in chosen:
                 project_label = os.path.basename(c["cwd"]) if c.get("cwd") else c["project"]
                 live = " [bold red](LIVE - active in the last 5 min)[/]" if c["is_live"] else ""
-                tui.console.print(f"  - {project_label} [dim]{c['session_id'][:8]}…[/]{live}")
+                tui.console.print(f"  - {tui._tool_label(c)} {tui.escape(project_label)} [dim]{tui.escape(c['session_id'])}[/]{live}")
 
             confirm = Prompt.ask("\nType DELETE to confirm (anything else cancels)", default="")
             if confirm.strip() != "DELETE":
@@ -220,7 +221,7 @@ def main():
             if failed:
                 tui.console.print("[bold red]Failed to delete:[/]")
                 for session_id, error in failed:
-                    tui.console.print(f"  - {session_id}: {error}")
+                    tui.console.print(f"  - {tui.escape(session_id)}: {tui.escape(str(error))}")
 
             input("\nPress Enter to return...")
 
