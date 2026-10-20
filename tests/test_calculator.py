@@ -284,6 +284,39 @@ class TestSessionMonitor(unittest.TestCase):
         self.assertFalse(main_path.exists())
         self.assertFalse(session_dir.exists())
 
+    def test_get_session_preview_returns_last_user_and_assistant_text(self):
+        def msg(kind, content):
+            return json.dumps({"type": kind, "message": {"content": content}})
+        self._write_session("proj-prev", "session-prev", [
+            _usage_line("claude-3-5-sonnet", 100, 50),
+            msg("user", "first question"),
+            msg("assistant", [{"type": "text", "text": "first answer"}]),
+            msg("user", "fix the login bug"),
+            msg("assistant", [{"type": "tool_use", "name": "Bash", "input": {"command": "SECRET"}}]),
+            msg("user", [{"type": "tool_result", "content": "SECRET OUTPUT"}]),
+            msg("user", "<local-command-caveat>ignore</local-command-caveat>"),
+            msg("assistant", [{"type": "text", "text": "done, tests pass"}]),
+            "not json",
+        ])
+        candidate = session_monitor.get_cleanup_candidates(
+            self.config_data, now=session_monitor.time.time(), threshold_seconds=0
+        )[0]
+        preview = session_monitor.get_session_preview(candidate)
+        self.assertEqual(preview["user"], "fix the login bug")
+        self.assertEqual(preview["assistant"], "done, tests pass")
+
+    def test_get_session_preview_truncates_and_tolerates_missing_file(self):
+        self._write_session("proj-long", "session-long", [
+            _usage_line("claude-3-5-sonnet", 100, 50),
+            json.dumps({"type": "user", "message": {"content": "x" * 50}}),
+        ])
+        candidate = session_monitor.get_cleanup_candidates(
+            self.config_data, now=session_monitor.time.time(), threshold_seconds=0
+        )[0]
+        self.assertEqual(session_monitor.get_session_preview(candidate, max_chars=10)["user"], "x" * 10 + "…")
+        session_monitor.delete_session(candidate)
+        self.assertEqual(session_monitor.get_session_preview(candidate), {"user": None, "assistant": None})
+
     def test_delete_session_handles_missing_file_without_raising(self):
         self._write_session("proj-gone", "session-gone", [_usage_line("claude-3-5-sonnet", 100, 50)])
         candidates = session_monitor.get_cleanup_candidates(

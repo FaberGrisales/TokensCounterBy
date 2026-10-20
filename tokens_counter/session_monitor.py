@@ -749,6 +749,64 @@ def get_cleanup_candidates(config_data, now=None, threshold_seconds=CLEANUP_INAC
     return candidates
 
 
+PREVIEW_TAIL_BYTES = 1024 * 1024
+PREVIEW_MAX_CHARS = 600
+_PREVIEW_SKIP_PREFIXES = ("<local-command", "<command-", "<system-reminder", "<user-prompt-submit-hook", "Caveat:")
+
+
+def _message_text(message):
+    """Joined text blocks of a transcript message; tool_use/tool_result blocks are ignored."""
+    content = message.get("content") if isinstance(message, dict) else None
+    if isinstance(content, str):
+        return content.strip()
+    if not isinstance(content, list):
+        return ""
+    parts = [b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text"]
+    return "\n".join(p for p in parts if isinstance(p, str)).strip()
+
+
+def get_session_preview(candidate, max_chars=PREVIEW_MAX_CHARS):
+    """
+    Returns {"user": str|None, "assistant": str|None}: the last thing the user
+    asked and the last thing Claude answered in this session's main
+    transcript, truncated to `max_chars`, like the preview Claude Code shows
+    when resuming a session. This is the ONE place the app reads message text
+    from a transcript, and it only runs when the user explicitly asks to
+    preview a session in Option 5's picker, so they can tell which session
+    they're about to delete. Reads only the tail of the file; never touches
+    tool_use inputs or tool_result content.
+    """
+    result = {"user": None, "assistant": None}
+    try:
+        with open(candidate["main_path"], "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(max(0, size - PREVIEW_TAIL_BYTES))
+            data = f.read()
+    except OSError:
+        return result
+    lines = data.split(b"\n")
+    if size > PREVIEW_TAIL_BYTES:
+        lines = lines[1:]  # first line is cut mid-record
+    for raw in reversed(lines):
+        if result["user"] and result["assistant"]:
+            break
+        try:
+            entry = json.loads(raw)
+        except ValueError:
+            continue
+        if not isinstance(entry, dict) or entry.get("isSidechain") or entry.get("isMeta"):
+            continue
+        kind = entry.get("type")
+        if kind not in ("user", "assistant") or result[kind]:
+            continue
+        text = _message_text(entry.get("message"))
+        if not text or text.startswith(_PREVIEW_SKIP_PREFIXES):
+            continue
+        result[kind] = text if len(text) <= max_chars else text[:max_chars].rstrip() + "…"
+    return result
+
+
 def delete_session(candidate):
     """
     Permanently deletes one session's main transcript file and its

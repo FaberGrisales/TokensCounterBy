@@ -1,5 +1,6 @@
 import os
 from rich.console import Console, Group
+from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
@@ -838,6 +839,20 @@ def render_cleanup_candidates(candidates):
         )
 
     console.print(table, justify="center")
+    console.print()
+
+def render_session_preview(candidate, preview):
+    """Prints the last user/assistant message of one cleanup candidate (see session_monitor.get_session_preview())."""
+    project_label = os.path.basename(candidate["cwd"]) if candidate.get("cwd") else candidate["project"]
+    body = []
+    for label, key in (("You", "user"), ("Claude", "assistant")):
+        text = preview.get(key)
+        body.append(f"[bold]{label}:[/] {escape(text) if text else '[dim]no text found[/]'}")
+    console.print(Panel(
+        "\n\n".join(body),
+        title=f"Last activity · {project_label} [dim]{candidate['session_id'][:8]}…[/]",
+        border_style="yellow",
+    ))
     console.print()
 
 def render_claude_config(mcp_servers, hooks):

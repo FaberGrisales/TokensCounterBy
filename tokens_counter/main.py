@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 from rich.prompt import Prompt
 
@@ -160,10 +161,19 @@ def main():
                 "this cannot be undone, and Claude Code has no way to recover it.[/]\n"
             )
 
-            selection = Prompt.ask(
-                "Enter numbers to delete (e.g. 1,3,5), 'all', or 'c' to cancel",
-                default="c"
-            )
+            while True:
+                selection = Prompt.ask(
+                    "Enter numbers to delete (e.g. 1,3,5), 'all', 'p N' to preview session N, or 'c' to cancel",
+                    default="c"
+                )
+                match = re.fullmatch(r"p\s*(\d+)", selection.strip().lower())
+                if not match:
+                    break
+                idx = int(match.group(1))
+                if 1 <= idx <= len(candidates):
+                    tui.render_session_preview(candidates[idx - 1], session_monitor.get_session_preview(candidates[idx - 1]))
+                else:
+                    tui.console.print("[yellow]No such session number.[/]")
             if selection.strip().lower() in ("c", "cancel", ""):
                 continue
 
