@@ -34,7 +34,7 @@ def main():
             "2": "Global Claude Usage (like /usage 📊)",
             "3": "Claude Code Config (MCP & Hooks 🔧)",
             "4": "Session Breakdown (subagents + MCP calls 🧩)",
-            "5": "Cleanup Inactive Sessions (delete 🗑️)",
+            "5": "Cleanup Sessions (delete 🗑️)",
             "6": "Floating Monitor (always on top 📌)",
             "7": "Enable Real Plan Limits (status line 📶)",
             "8": "Exit 🚪"
@@ -139,19 +139,19 @@ def main():
             input("\nPress Enter to return...")
 
         elif choice == "5":
-            # Cleanup: find sessions inactive for 7+ days and let the user
+            # Cleanup: list every local session and let the user
             # pick which ones to permanently delete (main transcript +
             # subagent files). This is the one destructive action in the
             # app - real, irreversible deletion of local Claude Code
             # history - so it requires seeing the exact list, picking
             # specific sessions, and typing "DELETE" to confirm.
             tui.clear_screen()
-            tui.console.print("[bold red]=== CLEANUP INACTIVE SESSIONS ===[/]\n")
-            tui.console.print("[dim]Scanning local sessions under ~/.claude/projects for sessions inactive 7+ days ...[/]\n")
+            tui.console.print("[bold red]=== CLEANUP SESSIONS ===[/]\n")
+            tui.console.print("[dim]Scanning local sessions under ~/.claude/projects ...[/]\n")
 
-            candidates = session_monitor.get_cleanup_candidates(config_data)
+            candidates = session_monitor.get_cleanup_candidates(config_data, threshold_seconds=0)
             if not candidates:
-                tui.console.print("[green]No sessions inactive for more than 7 days. Nothing to clean up.[/]")
+                tui.console.print("[green]No local sessions found. Nothing to clean up.[/]")
                 input("\nPress Enter to return...")
                 continue
 
@@ -199,7 +199,8 @@ def main():
             tui.console.print(f"\n[bold red]About to permanently delete {len(chosen)} session(s):[/]")
             for c in chosen:
                 project_label = os.path.basename(c["cwd"]) if c.get("cwd") else c["project"]
-                tui.console.print(f"  - {project_label} [dim]{c['session_id'][:8]}…[/]")
+                live = " [bold red](LIVE - active in the last 5 min)[/]" if c["is_live"] else ""
+                tui.console.print(f"  - {project_label} [dim]{c['session_id'][:8]}…[/]{live}")
 
             confirm = Prompt.ask("\nType DELETE to confirm (anything else cancels)", default="")
             if confirm.strip() != "DELETE":

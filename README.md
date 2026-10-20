@@ -89,7 +89,7 @@ Una vez iniciado, verás el menú principal con las siguientes opciones:
 2. **Global Claude Usage (like /usage)**: Estado de tu suscripción de Claude y una foto fija de tu consumo en esta máquina, inspirada en el comando real `/usage` de Claude Code (ver sección de abajo).
 3. **Claude Code Config (MCP & Hooks)**: Qué servidores MCP y qué hooks tienes configurados para este proyecto, inspirado en los comandos `/mcp` y `/hooks` (ver sección de abajo).
 4. **Session Breakdown**: Elegís una sesión y ves, subagente por subagente y **llamada MCP por llamada MCP**, exactamente cuántos tokens/cuánto costó cada invocación individual (ver sección de abajo).
-5. **Cleanup Inactive Sessions**: Borra permanentemente sesiones locales sin actividad hace 7+ días, con selección manual y confirmación explícita (ver sección de abajo).
+5. **Cleanup Sessions**: Lista todas las sesiones locales (las activas se marcan LIVE) y borra permanentemente las que elijas, con selección manual y confirmación explícita (ver sección de abajo).
 6. **Floating Monitor**: Abre una ventana pequeña que se queda **encima de las demás ventanas** con el uso de tu equipo (CPU, RAM, GPU, disco), el % real de tu plan, tus sesiones de Claude Code y la actividad de Claude Desktop, para verlo mientras trabajas en otra aplicación (ver sección de abajo).
 7. **Enable Real Plan Limits**: Activa la captura de tus porcentajes reales de límite de plan (5h y 7 días) desde Claude Code (ver sección de abajo).
 8. **Exit**: Cierra la aplicación.
@@ -257,18 +257,19 @@ Presiona **Ctrl+C** para detener y volver al menú.
 
 ---
 
-## 🗑️ Cleanup Inactive Sessions (Opción 5)
+## 🗑️ Cleanup Sessions (Opción 5)
 
 Con el tiempo, `~/.claude/projects` acumula un transcript por cada sesión que abriste alguna vez. Esta opción te deja borrar los que ya no te sirven — **es la única acción destructiva de toda la app**, así que tiene varias capas de seguridad antes de tocar un solo archivo.
 
 Cómo funciona:
 
-1. Busca sesiones **sin ninguna actividad en los últimos 7 días** (un umbral distinto y mucho más largo que el de 5 minutos que separa `● LIVE` de `○ idle` en el resto de la app) y las muestra en una tabla, ordenadas de la más vieja a la más reciente, con cuánto tiempo lleva inactiva, sus tokens y su costo acumulado.
+1. Lista **todas** las sesiones locales en una tabla, de la más vieja a la más reciente, con cuánto tiempo lleva inactiva, sus tokens y su costo acumulado. Las que tuvieron actividad en los últimos 5 minutos se marcan `LIVE`.
+   Para reconocer una sesión antes de borrarla, escribe `p N` (por ejemplo `p 3`) y verás tu último mensaje y la última respuesta de Claude.
 2. Elegís cuáles borrar escribiendo los números separados por coma (`1,3,5`), `all` para todas las de la lista, o `c` para cancelar sin tocar nada.
 3. Antes de borrar, te muestra la lista exacta de lo que vas a eliminar y te pide escribir **`DELETE`** (la palabra completa, en mayúsculas) para confirmar. Cualquier otra cosa cancela.
 4. Borra el archivo `.jsonl` principal de cada sesión elegida, y si tenía subagentes, también su carpeta `<session-id>/subagents/`.
 
-**Esto es permanente.** Una vez borrado, ni esta app ni Claude Code pueden recuperar ese historial — no hay papelera de reciclaje. Las sesiones con actividad reciente (menos de 7 días) nunca aparecen en la lista, así que no hay riesgo de borrar algo que estés usando activamente.
+**Esto es permanente.** Una vez borrado, ni esta app ni Claude Code pueden recuperar ese historial — no hay papelera de reciclaje. Si eliges una sesión `LIVE`, la confirmación te la vuelve a marcar antes de pedir `DELETE`.
 
 ---
 

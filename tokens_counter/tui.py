@@ -819,7 +819,7 @@ def render_cleanup_candidates(candidates):
     first. main.py uses the printed row numbers to build its interactive
     picker; this function only renders the list, it never deletes anything.
     """
-    table = Table(box=box.ROUNDED, border_style="red", title="[bold red]Inactive Sessions (cleanup candidates)[/]")
+    table = Table(box=box.ROUNDED, border_style="red", title="[bold red]Local Sessions (cleanup candidates)[/]")
     table.add_column("#", justify="right", style="bold yellow")
     table.add_column("Project / Session", style="bold green")
     table.add_column("Last Activity", justify="right")
@@ -828,7 +828,8 @@ def render_cleanup_candidates(candidates):
 
     for i, c in enumerate(candidates, start=1):
         project_label = os.path.basename(c["cwd"]) if c.get("cwd") else c["project"]
-        session_label = f"{project_label}\n[dim]{c['session_id'][:8]}…[/]"
+        live = " [bold red]LIVE[/]" if c["is_live"] else ""
+        session_label = f"{project_label}{live}\n[dim]{c['session_id'][:8]}…[/]"
         cost_str = _fmt_cost(c["cost"], estimated=c.get("cost_estimated"))
         table.add_row(
             str(i),

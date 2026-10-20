@@ -742,6 +742,7 @@ def get_cleanup_candidates(config_data, now=None, threshold_seconds=CLEANUP_INAC
         candidates.append({
             **summary,
             "age_seconds": age_seconds,
+            "is_live": age_seconds < ACTIVE_THRESHOLD_SECONDS,
             "main_path": group["main"],
             "subagent_paths": group["subagents"],
         })
