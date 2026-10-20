@@ -843,15 +843,22 @@ def render_cleanup_candidates(candidates):
     console.print()
 
 def render_session_preview(candidate, preview):
-    """Prints the last user/assistant message of one cleanup candidate (see session_monitor.get_session_preview())."""
+    """Prints one cleanup candidate's title, first prompt and last messages (see session_monitor.get_session_preview())."""
     project_label = os.path.basename(candidate["cwd"]) if candidate.get("cwd") else candidate["project"]
+    labels = {"user": "[bold cyan]You:[/]", "assistant": "[bold #d97757]Claude:[/]"}
     body = []
-    for label, key in (("You", "user"), ("Claude", "assistant")):
-        text = preview.get(key)
-        body.append(f"[bold]{label}:[/] {escape(text) if text else '[dim]no text found[/]'}")
+    if preview.get("title"):
+        body.append(f"[bold]{escape(preview['title'])}[/]")
+    if preview.get("first_prompt"):
+        body.append(f"[dim]Started with:[/] {escape(preview['first_prompt'])}")
+    if preview.get("messages"):
+        body.append("[dim]── Last messages ──[/]")
+        body += [f"{labels[role]} {escape(text)}" for role, text in preview["messages"]]
+    if not body:
+        body.append("[dim]No text found in this session.[/]")
     console.print(Panel(
         "\n\n".join(body),
-        title=f"Last activity · {project_label} [dim]{candidate['session_id'][:8]}…[/]",
+        title=f"Preview · {project_label} [dim]{candidate['session_id'][:8]}…[/] · {_format_duration(candidate['age_seconds'])} ago",
         border_style="yellow",
     ))
     console.print()

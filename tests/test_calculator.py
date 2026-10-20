@@ -301,9 +301,10 @@ class TestSessionMonitor(unittest.TestCase):
         candidate = session_monitor.get_cleanup_candidates(
             self.config_data, now=session_monitor.time.time(), threshold_seconds=0
         )[0]
-        preview = session_monitor.get_session_preview(candidate)
-        self.assertEqual(preview["user"], "fix the login bug")
-        self.assertEqual(preview["assistant"], "done, tests pass")
+        preview = session_monitor.get_session_preview(candidate, last_messages=2)
+        self.assertEqual(preview["first_prompt"], "first question")
+        self.assertEqual(preview["messages"], [("user", "fix the login bug"), ("assistant", "done, tests pass")])
+        self.assertNotIn("SECRET", json.dumps(session_monitor.get_session_preview(candidate)))
 
     def test_get_session_preview_truncates_and_tolerates_missing_file(self):
         self._write_session("proj-long", "session-long", [
@@ -313,9 +314,36 @@ class TestSessionMonitor(unittest.TestCase):
         candidate = session_monitor.get_cleanup_candidates(
             self.config_data, now=session_monitor.time.time(), threshold_seconds=0
         )[0]
-        self.assertEqual(session_monitor.get_session_preview(candidate, max_chars=10)["user"], "x" * 10 + "…")
+        preview = session_monitor.get_session_preview(candidate, max_chars=10)
+        self.assertEqual(preview["messages"], [("user", "x" * 10 + "…")])
+        self.assertIsNone(preview["first_prompt"])  # same message, not shown twice
         session_monitor.delete_session(candidate)
-        self.assertEqual(session_monitor.get_session_preview(candidate), {"user": None, "assistant": None})
+        self.assertEqual(session_monitor.get_session_preview(candidate), {"title": None, "first_prompt": None, "messages": []})
+
+    def test_get_session_preview_uses_newest_title_and_reads_head_and_tail_of_big_files(self):
+        def msg(kind, text):
+            return json.dumps({"type": kind, "message": {"content": text}})
+        filler = [msg("assistant", "filler " * 200)] * 40
+        self._write_session("proj-big", "session-big", [
+            _usage_line("claude-3-5-sonnet", 100, 50),
+            json.dumps({"type": "ai-title", "aiTitle": "Old title"}),
+            msg("user", "the opening prompt"),
+            *filler,
+            json.dumps({"type": "ai-title", "aiTitle": "New title"}),
+            msg("user", "last question"),
+        ])
+        candidate = session_monitor.get_cleanup_candidates(
+            self.config_data, now=session_monitor.time.time(), threshold_seconds=0
+        )[0]
+        original = session_monitor.PREVIEW_READ_BYTES
+        session_monitor.PREVIEW_READ_BYTES = 4096
+        try:
+            preview = session_monitor.get_session_preview(candidate, last_messages=1)
+        finally:
+            session_monitor.PREVIEW_READ_BYTES = original
+        self.assertEqual(preview["title"], "New title")
+        self.assertEqual(preview["first_prompt"], "the opening prompt")
+        self.assertEqual(preview["messages"], [("user", "last question")])
 
     def test_delete_session_handles_missing_file_without_raising(self):
         self._write_session("proj-gone", "session-gone", [_usage_line("claude-3-5-sonnet", 100, 50)])

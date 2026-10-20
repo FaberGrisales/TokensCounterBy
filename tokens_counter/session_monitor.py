@@ -750,8 +750,9 @@ def get_cleanup_candidates(config_data, now=None, threshold_seconds=CLEANUP_INAC
     return candidates
 
 
-PREVIEW_TAIL_BYTES = 1024 * 1024
-PREVIEW_MAX_CHARS = 600
+PREVIEW_READ_BYTES = 2 * 1024 * 1024
+PREVIEW_MAX_CHARS = 1500
+PREVIEW_LAST_MESSAGES = 6
 _PREVIEW_SKIP_PREFIXES = ("<local-command", "<command-", "<system-reminder", "<user-prompt-submit-hook", "Caveat:")
 
 
@@ -766,45 +767,72 @@ def _message_text(message):
     return "\n".join(p for p in parts if isinstance(p, str)).strip()
 
 
-def get_session_preview(candidate, max_chars=PREVIEW_MAX_CHARS):
-    """
-    Returns {"user": str|None, "assistant": str|None}: the last thing the user
-    asked and the last thing Claude answered in this session's main
-    transcript, truncated to `max_chars`, like the preview Claude Code shows
-    when resuming a session. This is the ONE place the app reads message text
-    from a transcript, and it only runs when the user explicitly asks to
-    preview a session in Option 5's picker, so they can tell which session
-    they're about to delete. Reads only the tail of the file; never touches
-    tool_use inputs or tool_result content.
-    """
-    result = {"user": None, "assistant": None}
-    try:
-        with open(candidate["main_path"], "rb") as f:
-            f.seek(0, os.SEEK_END)
-            size = f.tell()
-            f.seek(max(0, size - PREVIEW_TAIL_BYTES))
-            data = f.read()
-    except OSError:
-        return result
-    lines = data.split(b"\n")
-    if size > PREVIEW_TAIL_BYTES:
-        lines = lines[1:]  # first line is cut mid-record
-    for raw in reversed(lines):
-        if result["user"] and result["assistant"]:
-            break
+def _preview_entries(lines, max_chars):
+    """Yields ("title", str) and (role, text) pairs from raw transcript lines, in file order."""
+    for raw in lines:
         try:
             entry = json.loads(raw)
         except ValueError:
             continue
-        if not isinstance(entry, dict) or entry.get("isSidechain") or entry.get("isMeta"):
+        if not isinstance(entry, dict):
             continue
         kind = entry.get("type")
-        if kind not in ("user", "assistant") or result[kind]:
+        if kind == "ai-title" and isinstance(entry.get("aiTitle"), str):
+            yield "title", entry["aiTitle"].strip()
+            continue
+        if kind not in ("user", "assistant") or entry.get("isSidechain") or entry.get("isMeta"):
             continue
         text = _message_text(entry.get("message"))
         if not text or text.startswith(_PREVIEW_SKIP_PREFIXES):
             continue
-        result[kind] = text if len(text) <= max_chars else text[:max_chars].rstrip() + "…"
+        yield kind, text if len(text) <= max_chars else text[:max_chars].rstrip() + "…"
+
+
+def get_session_preview(candidate, max_chars=PREVIEW_MAX_CHARS, last_messages=PREVIEW_LAST_MESSAGES):
+    """
+    Returns {"title", "first_prompt", "messages"} for one session, like the
+    preview Claude Code shows when resuming it: the title Claude Code itself
+    generated (its `ai-title` entries), the user message that started the
+    session, and the last `last_messages` user/assistant messages as
+    (role, text) pairs, oldest first, each truncated to `max_chars`.
+
+    This is the ONE place the app reads message text from a transcript, and
+    it only runs when the user explicitly asks to preview a session in
+    Option 5's picker, so they can tell which session they're about to
+    delete. Only the head and tail of the file are read; tool_use inputs and
+    tool_result content are never touched.
+    """
+    result = {"title": None, "first_prompt": None, "messages": []}
+    try:
+        with open(candidate["main_path"], "rb") as f:
+            head = f.read(PREVIEW_READ_BYTES)
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            if size > PREVIEW_READ_BYTES:
+                f.seek(size - PREVIEW_READ_BYTES)
+                tail = f.read().split(b"\n")[1:]  # first line is cut mid-record
+                head = head.split(b"\n")[:-1]     # last line is cut mid-record
+            else:
+                head = tail = head.split(b"\n")
+    except OSError:
+        return result
+
+    for kind, text in _preview_entries(head, max_chars):
+        if kind == "title":
+            result["title"] = result["title"] or text
+        elif kind == "user":
+            result["first_prompt"] = text
+            break
+
+    messages = []
+    for kind, text in _preview_entries(tail, max_chars):
+        if kind == "title":
+            result["title"] = text  # the newest title wins, as in Claude Code
+        else:
+            messages.append((kind, text))
+    result["messages"] = messages[-last_messages:] if last_messages else []
+    if result["messages"] and result["messages"][0] == ("user", result["first_prompt"]):
+        result["first_prompt"] = None  # short session: already shown below
     return result
 
 
