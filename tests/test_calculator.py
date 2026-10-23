@@ -1333,6 +1333,25 @@ class TestDependencies(unittest.TestCase):
             self.assertNotIn("pip", command)
             self.assertNotIn("pip", (dep["manual_hint"] or ""))
 
+    def _venv(self, version_line):
+        venv = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, venv, ignore_errors=True)
+        with open(os.path.join(venv, "pyvenv.cfg"), "w") as f:
+            f.write(f"home = /usr/bin\ninclude-system-site-packages = false\n{version_line}\n")
+        return venv
+
+    def test_detects_a_venv_orphaned_by_a_system_python_upgrade(self):
+        """Ubuntu replaced 3.12 with 3.14: the venv's python silently ran 3.14 and saw no packages, not even pip."""
+        venv = self._venv("version = 3.12.3")
+        reason = dependencies.broken_venv_reason(venv, "/usr", (3, 14, 4))
+        self.assertIn("3.12", reason)
+        self.assertIn("3.14", reason)
+
+    def test_a_matching_venv_or_no_venv_is_fine(self):
+        venv = self._venv("version = 3.14.4")
+        self.assertIsNone(dependencies.broken_venv_reason(venv, "/usr", (3, 14, 4)))
+        self.assertIsNone(dependencies.broken_venv_reason("/usr", "/usr", (3, 8, 0)))
+
     def test_rich_is_required_and_tkinter_is_not(self):
         by_module = {d["module"]: d for d in dependencies.check_dependencies()}
         self.assertTrue(by_module["rich"]["required"])

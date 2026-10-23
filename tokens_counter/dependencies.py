@@ -20,6 +20,7 @@ trigger, so it stays opt-in and visible, the same way delete_session() does.
 
 import importlib.util
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -178,6 +179,41 @@ def install(dep):
     return True, f"{dep['label']} installed."
 
 
+def broken_venv_reason(prefix=None, base_prefix=None, version_info=None):
+    """
+    Why the running virtualenv can't install anything, or None if it can.
+
+    A venv's `python` is a symlink to the system interpreter. When the OS
+    upgrades Python (3.12 -> 3.14 on Ubuntu, with 3.12 removed), the symlink
+    silently starts running the new version, which looks for packages in
+    lib/python3.14 - a folder the venv never had. Every package, pip
+    included, vanishes, and offering `python -m pip install rich` just fails
+    with "No module named pip". The only fix is to recreate the venv.
+    """
+    prefix = sys.prefix if prefix is None else prefix
+    base_prefix = sys.base_prefix if base_prefix is None else base_prefix
+    version_info = sys.version_info if version_info is None else version_info
+    if prefix == base_prefix:
+        return None
+    running = f"{version_info[0]}.{version_info[1]}"
+    built_for = None
+    try:
+        with open(os.path.join(prefix, "pyvenv.cfg"), encoding="utf-8") as f:
+            for line in f:
+                key, _, value = line.partition("=")
+                if key.strip() in ("version", "version_info"):
+                    built_for = ".".join(value.strip().split(".")[:2])
+                    break
+    except OSError:
+        pass
+    if built_for and built_for != running:
+        return (f"This virtualenv was created with Python {built_for}, but it now runs Python {running} "
+                "(the system Python was upgraded), so none of its packages are visible.")
+    if not _module_available("pip"):
+        return "This virtualenv has no pip, so nothing can be installed into it."
+    return None
+
+
 def ensure_rich_or_exit():
     """
     Bootstrap check for the one hard dependency, run before rich is imported.
@@ -194,6 +230,17 @@ def ensure_rich_or_exit():
 
     if _module_available("rich"):
         return
+
+    broken = broken_venv_reason()
+    if broken:
+        print(f"ERROR: {broken}")
+        print("Recreate it (it's gitignored and holds nothing but installed packages):")
+        print(f"  rm -rf {shlex.quote(sys.prefix)}")
+        print(f"  python3 -m venv {shlex.quote(sys.prefix)}")
+        print(f"  {shlex.quote(os.path.join(sys.prefix, 'bin', 'python'))} -m pip install -r requirements.txt"
+              if sys.platform != "win32" else
+              f"  {os.path.join(sys.prefix, 'Scripts', 'python.exe')} -m pip install -r requirements.txt")
+        sys.exit(1)
 
     dep = next(d for d in check_dependencies() if d["module"] == "rich")
     print("Missing required dependency: rich (the terminal rendering library).")
